@@ -42,7 +42,7 @@ def evaluate_sequence(model,dataset,device,thresholds=(.3,),ledger=None,deadline
             tracker=ClasswiseTracker(fps,dataset.classes);last=max(indices)
             try:
                 for frame_index in range(last+1):
-                    if ledger and not ledger.can_start(deadline_reserve+30):complete=False;break
+                    if ledger and not ledger.can_evaluate(deadline_reserve+30):complete=False;break
                     ok,frame=capture.read()
                     if not ok:raise ValueError('Video ended before its annotated reference frames')
                     is_reference=frame_index in indices
@@ -174,7 +174,7 @@ def freeze_validation(checkpoint_path,baseline_path,config,device,output=None):
         raise ValueError('Validation requires the pinned public baseline and the training manifest')
     ledger=ExperimentBudget(config['budget_ledger'],config['train']['max_seconds'],config['train']['max_updates'])
     reserve=config['train'].get('final_evaluation_reserve_seconds',1800)
-    if not ledger.can_start(reserve+60):raise ValueError('No validation budget remains after reserving final evaluation')
+    if not ledger.can_evaluate(reserve+60):raise ValueError('No validation budget remains after reserving final evaluation')
     ledger.start_wall_clock();results={};profiles={}
     try:
         for name,current,size in [('improved',model,config['inference_size']),('baseline',baseline,old['config']['image_size'])]:

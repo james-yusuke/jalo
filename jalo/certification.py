@@ -1,6 +1,12 @@
 """Portable measurement provenance; an integrity check, not a security signature."""
 import hashlib
 import json
+import copy
+
+
+def inference_config(config):
+    return {k:copy.deepcopy(config[k]) for k in ('task','architecture','classes','model','image_size',
+                                               'mask_projection','mask_objective','foreground_supervision') if k in config}
 
 
 def model_digest(state):
@@ -22,8 +28,9 @@ def certificate(checkpoint, final_test):
     validation=result.get('validation',checkpoint.get('selection',{}).get('metrics',{}))
     test=result.get('selected',{})
     return {'format_version':1,'model_sha256':model_digest(checkpoint['model']),
-            'manifest_sha256':checkpoint['manifest_sha256'],'render_settings':checkpoint['render_settings'],
-            'validation':validation,'test':test,
+            'inference_config':inference_config(checkpoint.get('config',{})),
+            'manifest_sha256':checkpoint['manifest_sha256'],'render_settings':copy.deepcopy(checkpoint['render_settings']),
+            'validation':copy.deepcopy(validation),'test':copy.deepcopy(test),
             'quality_pass':bool(validation.get('quality_pass') and test.get('quality_pass')),
             'reference_type':'AI-created, visually reviewed polygons; no independent human verification',
             'scope':'Only the named held-out daylight source; no safety or generalization certification'}
@@ -32,6 +39,7 @@ def certificate(checkpoint, final_test):
 def validate_certificate(checkpoint, settings):
     cert=checkpoint.get('quality_certificate',{})
     if (cert.get('format_version')!=1 or cert.get('model_sha256')!=model_digest(checkpoint['model']) or
+            cert.get('inference_config')!=inference_config(checkpoint.get('config',{})) or
             cert.get('manifest_sha256')!=checkpoint.get('manifest_sha256') or
             cert.get('render_settings')!=checkpoint.get('render_settings') or not cert.get('quality_pass') or
             not cert.get('validation',{}).get('quality_pass') or not cert.get('test',{}).get('quality_pass') or

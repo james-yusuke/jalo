@@ -58,7 +58,7 @@ def evaluate_adaptation(model,dataset,device,thresholds=THRESHOLDS,foreground_on
     per_frame=[]
     try:
         for i in range(len(dataset)):
-            if ledger and not ledger.can_start(deadline_reserve+30):
+            if ledger and not ledger.can_evaluate(deadline_reserve+30):
                 raise EvaluationBudgetExceeded('Evaluation stopped at the shared experiment time limit')
             batch=collate([dataset[i]]);inputs=model_inputs(batch,device);target=batch['target'][0]
             synchronize(device);then=time.perf_counter();out=model(**inputs);synchronize(device)
@@ -156,6 +156,7 @@ class ExperimentBudget:
         if missing>0:self.charge(missing,0,'logging_checkpoint_overhead')
     def remaining(self):return max(0.,self.max_seconds-self.elapsed_seconds())
     def can_start(self,reserve=15.):return self.remaining()>reserve and self.state['updates']<self.max_updates
+    def can_evaluate(self,reserve=15.):return self.remaining()>reserve
     def charge(self,seconds,updates,phase):
         self.state['seconds']+=float(seconds);self.state['updates']+=updates
         self.state['events'].append({'phase':phase,'seconds':float(seconds),'updates':updates})
@@ -323,7 +324,7 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
             if step==1 or step%10==0:print(f'{phase} {step}: loss={losses["total"]:.4f}, used={ledger.state["seconds"]:.1f}s',flush=True)
             transition=(phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800)) or (
                         phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600))
-            if phase=='warmup' and step%tc['validate_every']==0 and can_train(120):
+            if phase=='warmup' and step%tc['validate_every']==0 and ledger.can_evaluate(final_reserve+120):
                 before=time.perf_counter();state=rng_state()
                 result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
                 seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'warmup_validation')
@@ -331,7 +332,7 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                 report_files(run/'warmup_metrics.json',result)
                 with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
                 print(f'Warmup validation: mask AP={result["raw_ap"]["mask_mAP"]:.4f}',flush=True)
-            if phase=='joint' and (step%tc['validate_every']==0 or not can_train(180)) and can_train(120):
+            if phase=='joint' and (step%tc['validate_every']==0 or not can_train(180)) and ledger.can_evaluate(final_reserve+120):
                 before=time.perf_counter();state=rng_state()
                 result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
                 seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'validation')

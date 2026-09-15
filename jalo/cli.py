@@ -37,7 +37,7 @@ def parser():
             p.add_argument("--bootstrap", action="store_true", help="Use bootstrap training budget")
     ev = sub.add_parser("evaluate")
     ev.add_argument("--checkpoint", required=True)
-    ev.add_argument("--baseline", help="Pinned public checkpoint for a frozen one-time final comparison")
+    ev.add_argument("--baseline", help="Public checkpoint for validation freeze or a one-time final comparison")
     ev.add_argument("--split", choices=["train", "val", "test"], default="val")
     ev.add_argument("--config", help="Optional dataset path configuration")
     ev.add_argument("--output", default="outputs/evaluation.json")
@@ -84,7 +84,7 @@ def main():
                 if args.instructions:
                     print('video-instances: supply --sources sources.json (multiple whole-video splits) or --input source.webm, and --annotations reviewed COCO JSON. '
                           'The annotation JSON must contain info, images, annotations, categories and review; '
-                          'the reference interval specification is jalo.video_data.INTERVALS.')
+                          'single-video intervals are jalo.video_data.INTERVALS; multi-video intervals and FPS are specified per source in --sources.')
                     return
                 if bool(args.input)==bool(args.sources) or not args.annotations:
                     raise ValueError("video-instances requires exactly one of --input / --sources and --annotations reviewed.json")
