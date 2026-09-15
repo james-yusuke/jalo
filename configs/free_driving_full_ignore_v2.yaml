@@ -32,6 +32,7 @@ model:
   heads: 6
   layers: 3
   queries: 100
+  detach_mask_boxes: true
 train:
   batch_size: 1
   accumulation: 4

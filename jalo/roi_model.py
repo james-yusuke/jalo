@@ -87,7 +87,7 @@ class VehicleROI(nn.Module):
     architecture='vehicle_roi_v2'
     task='instance_segmentation'
     variant='single'
-    def __init__(self,num_classes=3,dim=192,heads=6,layers=3,queries=100,pretrained=True,task='instance_segmentation',mask_projection='dense',mask_objective='global',foreground_supervision='feature'):
+    def __init__(self,num_classes=3,dim=192,heads=6,layers=3,queries=100,pretrained=True,task='instance_segmentation',mask_projection='dense',mask_objective='global',foreground_supervision='feature',detach_mask_boxes=False):
         super().__init__()
         if task!=self.task or layers not in (1,2,3) or dim%8 or dim%heads:
             raise ValueError('Invalid ROI architecture configuration')
@@ -98,6 +98,9 @@ class VehicleROI(nn.Module):
         self.mask_objective=mask_objective
         if foreground_supervision not in ('feature','input'):raise ValueError('Unknown foreground supervision')
         self.foreground_supervision=foreground_supervision
+        # Keep mask supervision from moving its own crop toward an easier subregion.
+        # The default preserves earlier checkpoints' training behavior and adds no weights.
+        self.detach_mask_boxes=detach_mask_boxes
         self.backbone=Backbone(dim,pretrained,with_masks=True)
         self.center=nn.Sequential(nn.Conv2d(dim,dim,3,padding=1),nn.GELU(),nn.Conv2d(dim,num_classes,1))
         self.geometry=nn.Sequential(nn.Conv2d(dim,dim,3,padding=1),nn.GELU(),nn.Conv2d(dim,4,1))
@@ -149,17 +152,18 @@ class VehicleROI(nn.Module):
             pad=F.interpolate(padding[:,0,None].float(),size=feature.shape[-2:],mode='nearest')[:,0].bool()
             q,boxes,logits=layer(q,boxes,feature,pad)
             aux.append({'logits':logits,'boxes':boxes})
+        mask_boxes=boxes.detach() if self.detach_mask_boxes else boxes
         if mask_query_threshold is None:
             # Training and AP retain every query. Each ROI uses independent convolutions/GroupNorm.
-            local=self.roi_masks(mask_features,[box for box in boxes])
-            masks=torch.stack([paste_roi_logits(mask,box,(h,w)) for mask,box in zip(local,boxes)])
+            local=self.roi_masks(mask_features,[box for box in mask_boxes])
+            masks=torch.stack([paste_roi_logits(mask,box,(h,w)) for mask,box in zip(local,mask_boxes)])
         else:
             # The renderer never draws these rejected queries; omit only their mask computation.
             probabilities=logits.softmax(-1)
             keep=(probabilities[:,:,:-1].amax(-1)>=mask_query_threshold) & (logits.argmax(-1)<self.num_classes)
-            selected=self.roi_masks(mask_features,[box[k] for box,k in zip(boxes,keep)])
+            selected=self.roi_masks(mask_features,[box[k] for box,k in zip(mask_boxes,keep)])
             local=[];canvases=[]
-            for mask,box,k in zip(selected,boxes,keep):
+            for mask,box,k in zip(selected,mask_boxes,keep):
                 roi=mask_features.new_full((len(box),56,56),-20.)
                 canvas=mask_features.new_full((len(box),h,w),-20.)
                 roi[k]=mask;canvas[k]=paste_roi_logits(mask,box[k],(h,w))
