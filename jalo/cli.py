@@ -13,6 +13,7 @@ def parser():
     prep = sub.add_parser("prepare", help="Validate BDD100K, COCO or reviewed video instances and create a reproducible manifest")
     prep.add_argument("--dataset", choices=["bdd100k", "coco-instances", "video-instances"], default="bdd100k")
     prep.add_argument("--input", help="Source video for video-instances; annotations must already be reviewed")
+    prep.add_argument("--sources", help="JSON source list with whole-video splits for video-instances")
     prep.add_argument("--root", help="Dataset root; defaults depend on --dataset")
     prep.add_argument("--annotations", help="COCO trainval ZIP, or reviewed video COCO JSON for video-instances")
     prep.add_argument("--device", choices=["auto", "mps", "cuda", "cpu"], default="auto",
@@ -36,6 +37,7 @@ def parser():
             p.add_argument("--bootstrap", action="store_true", help="Use bootstrap training budget")
     ev = sub.add_parser("evaluate")
     ev.add_argument("--checkpoint", required=True)
+    ev.add_argument("--baseline", help="Pinned public checkpoint for a frozen one-time final comparison")
     ev.add_argument("--split", choices=["train", "val", "test"], default="val")
     ev.add_argument("--config", help="Optional dataset path configuration")
     ev.add_argument("--output", default="outputs/evaluation.json")
@@ -78,15 +80,16 @@ def main():
             result = export_checkpoint(args.checkpoint, args.output)
         elif args.command == "prepare":
             if args.dataset == "video-instances":
-                from .video_data import prepare_video
+                from .video_data import prepare_video, prepare_videos
                 if args.instructions:
-                    print('video-instances: supply --input source.webm and --annotations reviewed COCO JSON. '
+                    print('video-instances: supply --sources sources.json (multiple whole-video splits) or --input source.webm, and --annotations reviewed COCO JSON. '
                           'The annotation JSON must contain info, images, annotations, categories and review; '
                           'the reference interval specification is jalo.video_data.INTERVALS.')
                     return
-                if not args.input or not args.annotations:
-                    raise ValueError("video-instances requires --input source.webm and --annotations reviewed.json")
-                print(json.dumps({"manifest":str(prepare_video(args.root or 'data/video_instances',args.input,args.annotations,args.overwrite))}))
+                if bool(args.input)==bool(args.sources) or not args.annotations:
+                    raise ValueError("video-instances requires exactly one of --input / --sources and --annotations reviewed.json")
+                prepare_function=prepare_videos if args.sources else prepare_video
+                print(json.dumps({"manifest":str(prepare_function(args.root or 'data/video_instances',args.sources or args.input,args.annotations,args.overwrite))}))
                 return
             args.root = args.root or ("data/coco_vehicle" if args.dataset == "coco-instances" else "data/bdd100k")
             from .data import DOWNLOAD_GUIDE, prepare
@@ -114,8 +117,15 @@ def main():
                                                   args.resume, args.bootstrap or (args.variant == "single" and not args.initialize)))}
         elif args.command == "evaluate":
             from .engine import evaluate_checkpoint
-            result = evaluate_checkpoint(args.checkpoint, args.split, args.device,
-                                         load_config(args.config) if args.config else None, args.output)
+            if args.baseline:
+                if args.split not in ('val','test') or not args.config:raise ValueError('--baseline requires --split val/test and --config')
+                from .sequence_eval import compare_final, freeze_validation
+                from .runtime import select_device
+                action=compare_final if args.split=='test' else freeze_validation
+                result=action(args.checkpoint,args.baseline,load_config(args.config),select_device(args.device),args.output)
+            else:
+                result = evaluate_checkpoint(args.checkpoint, args.split, args.device,
+                                             load_config(args.config) if args.config else None, args.output)
         elif args.command == "demo":
             from .video import demo
             if args.max_frames is not None and args.max_frames <= 0:

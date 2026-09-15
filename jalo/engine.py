@@ -91,7 +91,8 @@ def export_checkpoint(source, destination):
         raise ValueError('Only trained checkpoints can be exported')
     config = checkpoint['config']
     clean_config = {key: copy.deepcopy(config[key]) for key in
-                    ('task', 'architecture', 'classes', 'model', 'image_size', 'seed') if key in config}
+                    ('task', 'architecture', 'classes', 'model', 'image_size', 'seed',
+                     'mask_projection','mask_objective','foreground_supervision') if key in config}
     clean_config.update(pretrained=False, device='auto')
     # Do not copy arbitrary run metadata or embedded training data into a Release.
     exported = {key: checkpoint[key] for key in
@@ -101,6 +102,17 @@ def export_checkpoint(source, destination):
                     source_checkpoint_sha256=checkpoint['loaded_sha256'])
     if checkpoint.get('render_settings'):
         exported['render_settings'] = copy.deepcopy(checkpoint['render_settings'])
+    if checkpoint.get('quality_certificate'):
+        exported['quality_certificate']=copy.deepcopy(checkpoint['quality_certificate'])
+    elif config.get('architecture')=='vehicle_roi_v2' and config.get('data_root'):
+        lock=Path(config['data_root'])/'final_test_lock.json'
+        if lock.exists():
+            from .certification import certificate
+            exported['quality_certificate']=certificate(checkpoint,json.loads(lock.read_text()))
+    if checkpoint.get('initialization'):
+        exported['initialization']=copy.deepcopy(checkpoint['initialization'])
+    for key in ('annotations_sha256','coco_manifest_sha256'):
+        if key in checkpoint:exported[key]=checkpoint[key]
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + '.tmp')
     torch.save(exported, temporary)
@@ -186,9 +198,9 @@ def train(config, variant="single", run_dir=None, initialize=None, resume=None, 
         from .adapt import train_adaptation
         if resume and load_checkpoint(resume).get('inference_only'):
             raise ValueError('Release weights have no optimizer state; a full training checkpoint is required to resume')
-        if variant != "single" or initialize:
-            raise ValueError("Vehicle adaptation uses single; use --resume for its own checkpoint")
-        return train_adaptation(config, run_dir, resume)
+        if variant != "single" or (initialize and resume):
+            raise ValueError("Vehicle adaptation uses single; choose initialize OR resume")
+        return train_adaptation(config, run_dir, resume, initialize)
     config = copy.deepcopy(config)
     seed_all(config["seed"])
     device = select_device(config.get("device", "auto"))

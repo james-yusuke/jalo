@@ -208,6 +208,11 @@ class CocoVehicles(Dataset):
             if flip: interior = np.ascontiguousarray(interior[:, ::-1])
             target.update(interior_mask=interior, video=self.manifest.get('source_sha256','video'),
                           frame_index=im['frame_index'], time=im['source_timestamp_seconds'])
+        elif im.get('interior_polygons'):
+            interior=annotation_mask(im['interior_polygons'],h,w)
+            target['interior_mask']=np.ascontiguousarray(interior[:,::-1]) if flip else interior
+        if 'source_id' in im:
+            target.update(video=im['source_id'],frame_index=im['frame_index'],time=im['source_timestamp_seconds'])
         # Empty history is explicit: still images must not be represented as genuine video clips.
         return {"images": image[None].expand(3, -1, -1, -1), "padding": padding[None].expand(3, -1, -1),
                 "history_valid": torch.tensor([False, False]), "time_deltas": torch.tensor([.2, .4]), "target": target}

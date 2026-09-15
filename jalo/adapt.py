@@ -19,6 +19,10 @@ from .runtime import digest, environment, memory_bytes, restore_rng, rng_state, 
 THRESHOLDS=(.3,.4,.5,.6,.7)
 
 
+class EvaluationBudgetExceeded(RuntimeError):
+    pass
+
+
 def resume_configs_match(saved,current):
     """Changing the execution backend must not relax data/model/budget identity."""
     return {k:v for k,v in saved.items() if k!='device'}=={k:v for k,v in current.items() if k!='device'}
@@ -43,7 +47,7 @@ def subset_prediction(prediction, threshold):
 
 
 @torch.no_grad()
-def evaluate_adaptation(model,dataset,device,thresholds=THRESHOLDS,foreground_only=True):
+def evaluate_adaptation(model,dataset,device,thresholds=THRESHOLDS,foreground_only=True,ledger=None,deadline_reserve=0):
     was_training=model.training;model.eval();started=time.perf_counter();inference=0.
     quality={v:VehicleQuality() for v in thresholds}
     ap={v:InstanceMetrics(dataset.classes) for v in thresholds}
@@ -54,6 +58,8 @@ def evaluate_adaptation(model,dataset,device,thresholds=THRESHOLDS,foreground_on
     per_frame=[]
     try:
         for i in range(len(dataset)):
+            if ledger and not ledger.can_start(deadline_reserve+30):
+                raise EvaluationBudgetExceeded('Evaluation stopped at the shared experiment time limit')
             batch=collate([dataset[i]]);inputs=model_inputs(batch,device);target=batch['target'][0]
             synchronize(device);then=time.perf_counter();out=model(**inputs);synchronize(device)
             inference+=time.perf_counter()-then
@@ -77,7 +83,7 @@ def evaluate_adaptation(model,dataset,device,thresholds=THRESHOLDS,foreground_on
             calibration.append(item)
         selected=max(calibration,key=lambda q:calibration_rank(q,q['mask_mAP']))
         result={'raw_ap':raw.compute(),'calibration':calibration,'selected':selected,'per_frame':per_frame,
-            'loss':loss/len(dataset),'evaluation_seconds':time.perf_counter()-started,'inference_seconds':inference,
+            'loss':loss/len(dataset) if len(dataset) else None,'evaluation_seconds':time.perf_counter()-started,'inference_seconds':inference,
             'inference_fps':len(dataset)/max(inference,1e-9),'active_parameters':model.active_parameter_count(),
             'device':str(device),**memory_bytes(device)}
         return result
@@ -93,6 +99,8 @@ def report_files(path,result):
 
 def evaluate_adaptation_checkpoint(model,checkpoint,path,config,split,device,output):
     if split not in ('train','val','test'):raise ValueError('Unknown adaptation split')
+    if config.get('initialization_sha256') and split=='test':
+        raise ValueError('This experiment requires the one-time paired final comparison: use --baseline with --split test')
     if digest(config['manifest'])!=checkpoint['manifest_sha256']:
         raise ValueError('Evaluation annotation/split manifest differs from the trained checkpoint')
     config=copy.deepcopy(config);profile=checkpoint.get('render_settings')
@@ -115,7 +123,14 @@ def evaluate_adaptation_checkpoint(model,checkpoint,path,config,split,device,out
             return result
         # Exclusive creation means simultaneous evaluations cannot consume test twice.
         with lock.open('x') as f:json.dump({'identity':identity,'result':None},f)
-    result=evaluate_adaptation(model,dataset_for(config,split),device,thresholds)
+    if config.get('initialization_sha256'):
+        tc=config['train'];ledger=ExperimentBudget(config['budget_ledger'],tc['max_seconds'],tc['max_updates'])
+        ledger.start_wall_clock()
+        try:
+            result=evaluate_adaptation(model,dataset_for(config,split),device,thresholds,ledger=ledger,
+                                       deadline_reserve=tc.get('final_evaluation_reserve_seconds',1800))
+        finally:ledger.reconcile_wall_clock()
+    else:result=evaluate_adaptation(model,dataset_for(config,split),device,thresholds)
     result.update(checkpoint=str(Path(path).resolve()),split=split,**identity)
     if split=='test':write_json(lock,{'identity':identity,'result':result})
     if output:report_files(output,result)
@@ -147,9 +162,10 @@ class ExperimentBudget:
         write_json(self.path,self.state)
 
 
-def train_adaptation(config,run_dir=None,resume=None):
+def train_adaptation(config,run_dir=None,resume=None,initialize=None):
     if (Path(config['data_root'])/'final_test_lock.json').exists():
         raise ValueError('Final test already consumed: this adaptation experiment is frozen; do not resume training or tune on test')
+    if initialize and resume:raise ValueError('Use initialize OR resume')
     config=copy.deepcopy(config);seed_all(config['seed']);device=select_device(config.get('device','auto'))
     run=Path(run_dir or config.get('run_dir','runs/vehicle_adapt_v2'));run.mkdir(parents=True,exist_ok=True)
     if any(run.iterdir()) and not resume:raise FileExistsError(f'{run} is not empty; use --resume or a new run')
@@ -159,18 +175,47 @@ def train_adaptation(config,run_dir=None,resume=None):
     if tc['batch_size']*tc['accumulation']%2:
         raise ValueError('An even effective batch is required for equal COCO/video sampling')
     manifest=digest(config['manifest']);coco_sha=digest(config['coco_manifest'])
-    ann=json.loads(Path(config['manifest']).read_text())['annotations_sha256']
+    video_manifest=json.loads(Path(config['manifest']).read_text())
+    ann=video_manifest['annotations_sha256']
+    if video_manifest.get('format_version')==4:
+        # Bind this run to the frozen source specification and reviewed image bytes.
+        source_spec=Path(config['data_root'])/'sources.json'
+        annotation_path=Path(config['data_root'])/'annotations.json'
+        if digest(source_spec)!=video_manifest['sources_sha256'] or digest(annotation_path)!=ann:
+            raise ValueError('Source specification or reference annotations changed since preparation')
+        # The full image/overlay review was verified by prepare; check its frozen image bytes again.
+        from .data import contained_path
+        for split in video_manifest['splits'].values():
+            for image in split:
+                if digest(contained_path(config['data_root'],image['path']))!=image['sha256']:
+                    raise ValueError('A reviewed frame changed since preparation')
     checkpoint=load_checkpoint(resume) if resume else None
+    initial=load_checkpoint(initialize) if initialize else None
+    if initial and config.get('initialization_sha256') and initial['loaded_sha256']!=config['initialization_sha256']:
+        raise ValueError('Initialization differs from the pinned public checkpoint')
+    if config.get('initialization_sha256') and not (initial or checkpoint):
+        raise ValueError('This experiment requires --initialize with its pinned public model')
     if checkpoint:
         if not resume_configs_match(checkpoint['config'],config) or checkpoint['manifest_sha256']!=manifest or checkpoint['coco_manifest_sha256']!=coco_sha:
             raise ValueError('Resume requires identical training config, annotations, split and COCO selection; only device may change')
+        saved_budget=checkpoint.get('budget',{})
+        if (ledger.state['seconds']<saved_budget.get('seconds',0) or ledger.state['updates']<saved_budget.get('updates',0) or
+                ledger.state['events'][:len(saved_budget.get('events',[]))]!=saved_budget.get('events',[])):
+            raise ValueError('Shared experiment budget is missing or older than this checkpoint; restore its original ledger')
+        if config.get('initialization_sha256') and checkpoint.get('initialization',{}).get('source_checkpoint_sha256')!=config['initialization_sha256']:
+            raise ValueError('Resume lineage differs from the pinned public model')
         if checkpoint['config'].get('device')!=config.get('device'):
             write_json(run/f'device_resume_step{checkpoint["step"]}.json',{
                 'checkpoint_sha256':checkpoint['loaded_sha256'],'saved_device':checkpoint['config'].get('device'),
                 'requested_device':config.get('device'),'resolved_device':str(device),
                 'note':'Model/optimizer/data/RNG state restored; numerical training across backends is not bitwise equivalent.'})
-    model=build_model(config,'single',pretrained=False if checkpoint else None).to(device).train()
+    model=build_model(config,'single',pretrained=False if checkpoint or initial else None).to(device).train()
     if checkpoint:model.load_state_dict(checkpoint['model'])
+    from .initialization import initialize_roi, freeze_inherited
+    inheritance=checkpoint.get('initialization',{}) if checkpoint else {}
+    if initial:
+        inheritance=initialize_roi(model,initial)
+        write_json(run/'initialization.json',inheritance)
     backbone=[];other=[]
     for name,p in model.named_parameters():
         (backbone if name.startswith('backbone.') and not any(s in name for s in ('project','fuse','pixel','refine')) else other).append(p)
@@ -210,7 +255,8 @@ def train_adaptation(config,run_dir=None,resume=None):
             'scheduler':scheduler.state_dict(),'rng':rng_state(),'stream':stream.state(),'step':step,'phase':phase,
             'phase_seconds':phase_seconds,'phase_steps':phase_steps,'best_rank':best_rank,'render_settings':profile,
             'selection':selection,'manifest_sha256':manifest,'annotations_sha256':ann,'coco_manifest_sha256':coco_sha,
-            'budget':ledger.state,'environment':environment(),'first_overfit_loss':first_loss,'last_overfit_loss':last_loss}
+            'budget':ledger.state,'environment':environment(),'first_overfit_loss':first_loss,'last_overfit_loss':last_loss,
+            'initialization':inheritance}
         tmp=run/(name+'.tmp');torch.save(state,tmp);os.replace(tmp,run/name)
     print(f'Adaptation: device={device}, update={step}, shared remaining={ledger.remaining():.1f}s',flush=True)
     if resume and (run/'train.jsonl').exists():
@@ -220,85 +266,115 @@ def train_adaptation(config,run_dir=None,resume=None):
             with (run/'abandoned_updates.jsonl').open('a') as f:
                 for row in abandoned:f.write(json.dumps(row)+'\n')
             (run/'train.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in entries if row['step']<=step))
-    while ledger.can_start(tc.get('step_reserve_seconds',30)):
-        # Completed stage checkpoints resume at the following stage, without an extra update.
-        if phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800):phase='warmup'
-        if phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600):phase='joint'
-        if active_phase!=phase:
-            stage_config=copy.deepcopy(config)
-            stage_config['image_size']=config['inference_size'] if phase=='joint' else config['initial_size']
+    final_reserve=float(tc.get('final_evaluation_reserve_seconds',0))+float(tc.get('final_validation_reserve_seconds',0))
+    def can_train(reserve=30):return ledger.can_start(final_reserve+reserve)
+    def reviewed_overfit():
+        path=run/'overfit_review.json';completed=run/'overfit_complete.pt'
+        if not path.exists() or not completed.exists():return False
+        review=json.loads(path.read_text())
+        return (review.get('checkpoint_sha256')==digest(completed) and review.get('masks_reviewed') is True
+                and review.get('finite_gradients') is True and review.get('loss_decreased') is True)
+    try:
+        while can_train(tc.get('step_reserve_seconds',30)):
+            # Completed stage checkpoints resume at the following stage, without an extra update.
+            if phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800):
+                if tc.get('require_overfit_review') and not reviewed_overfit():
+                    raise ValueError('Inspect overfit_complete.pt instance masks and gradients before resuming; save the bound overfit_review.json')
+                phase='warmup'
+            if phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600):phase='joint'
+            if active_phase!=phase:
+                freeze_inherited(model,inheritance,phase=='warmup')
+                stage_config=copy.deepcopy(config)
+                stage_config['image_size']=config['inference_size'] if phase=='joint' else config['initial_size']
+                if phase=='overfit':
+                    stage_config['train']['flip_probability']=0.
+                    dataset=dataset_for(stage_config,'train',False)
+                    candidates=[i for i,im in enumerate(dataset.images) if im['annotations']]
+                    count=tc.get('overfit_images',4)
+                    if len(candidates)<count:raise ValueError(f'Overfit check needs at least {count} annotated vehicle images')
+                    # Spread the fixed selection across the training videos, not just adjacent frames.
+                    import random
+                    candidates=random.Random(config['seed']).sample(candidates,count)
+                    data=Subset(dataset,candidates)
+                    write_json(run/'overfit_selection.json',{'image_ids':[dataset.images[i]['id'] for i in candidates]})
+                else:data=dataset_for(stage_config,'train',True)
+                stream_type=SampleStream if phase=='overfit' else PairedSampleStream
+                stream=stream_type(len(data),config['seed'])
+                if checkpoint and checkpoint['phase']==phase:
+                    stream=stream_type(len(data),config['seed'],**checkpoint['stream']);checkpoint=None
+                active_phase=phase
+            started=time.perf_counter();optimizer.zero_grad(set_to_none=True);losses={}
+            for _ in range(tc['accumulation']):
+                batch=collate([data[stream.next()] for _ in range(tc['batch_size'])]);out=model(**model_inputs(batch,device))
+                if phase=='warmup':out['training_roi_logits']=model.roi_masks(out['mask_features'],[t['boxes'].to(device) for t in batch['target']])
+                parts=criterion(out,batch['target'],phase='warmup' if phase=='warmup' else 'joint')
+                if not torch.isfinite(parts['total']):raise FloatingPointError(f'Nonfinite loss at {phase}/{step}')
+                (parts['total']/tc['accumulation']).backward()
+                for key,value in parts.items():losses[key]=losses.get(key,0.)+float(value.detach())/tc['accumulation']
+            norm=torch.nn.utils.clip_grad_norm_(model.parameters(),tc['clip_grad'],error_if_nonfinite=True)
+            optimizer.step();scheduler.step();synchronize(device);step+=1;phase_steps[phase]+=1
+            seconds=time.perf_counter()-started;phase_seconds[phase]+=seconds;ledger.charge(seconds,1,phase)
             if phase=='overfit':
-                stage_config['train']['flip_probability']=0.
-                dataset=dataset_for(stage_config,'train',False)
-                candidates=[i for i,im in enumerate(dataset.images) if im['annotations']]
-                if len(candidates)<4:raise ValueError('Overfit check needs at least four annotated vehicle images')
-                data=Subset(dataset,candidates[:4])
-            else:data=dataset_for(stage_config,'train',True)
-            stream_type=SampleStream if phase=='overfit' else PairedSampleStream
-            stream=stream_type(len(data),config['seed'])
-            if checkpoint and checkpoint['phase']==phase:
-                stream=stream_type(len(data),config['seed'],**checkpoint['stream']);checkpoint=None
-            active_phase=phase
-        started=time.perf_counter();optimizer.zero_grad(set_to_none=True);losses={}
-        for _ in range(tc['accumulation']):
-            batch=collate([data[stream.next()] for _ in range(tc['batch_size'])]);out=model(**model_inputs(batch,device))
-            if phase=='warmup':out['training_roi_logits']=model.roi_masks(out['mask_features'],[t['boxes'].to(device) for t in batch['target']])
-            parts=criterion(out,batch['target'],phase='warmup' if phase=='warmup' else 'joint')
-            if not torch.isfinite(parts['total']):raise FloatingPointError(f'Nonfinite loss at {phase}/{step}')
-            (parts['total']/tc['accumulation']).backward()
-            for key,value in parts.items():losses[key]=losses.get(key,0.)+float(value.detach())/tc['accumulation']
-        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),tc['clip_grad'],error_if_nonfinite=True)
-        optimizer.step();scheduler.step();synchronize(device);step+=1;phase_steps[phase]+=1
-        seconds=time.perf_counter()-started;phase_seconds[phase]+=seconds;ledger.charge(seconds,1,phase)
-        if phase=='overfit':
-            if first_loss is None:first_loss=losses['total']
-            last_loss=losses['total']
-        row={'step':step,'phase':phase,**losses,'gradient_norm':float(norm),'phase_seconds':phase_seconds[phase],
-             'experiment_seconds':ledger.state['seconds']}
-        with (run/'train.jsonl').open('a') as f:f.write(json.dumps(row,allow_nan=False)+'\n')
-        if step==1 or step%10==0:print(f'{phase} {step}: loss={losses["total"]:.4f}, used={ledger.state["seconds"]:.1f}s',flush=True)
-        transition=(phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800)) or (
-                    phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600))
-        if phase=='warmup' and step%tc['validate_every']==0 and ledger.remaining()>120:
-            before=time.perf_counter();state=rng_state()
-            result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device);restore_rng(state)
-            seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'warmup_validation')
-            result.update(step=step,phase=phase,image_size=stage_config['image_size'],eligible_for_selection=False)
-            report_files(run/'warmup_metrics.json',result)
-            with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
-            print(f'Warmup validation: mask AP={result["raw_ap"]["mask_mAP"]:.4f}',flush=True)
-        if phase=='joint' and (step%tc['validate_every']==0 or not ledger.can_start(180)) and ledger.remaining()>120:
-            before=time.perf_counter();state=rng_state()
-            result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device);restore_rng(state)
-            seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'validation')
-            chosen=result['selected'];rank=calibration_rank(chosen,chosen['mask_mAP'])
-            result.update(step=step,experiment_seconds=ledger.state['seconds']);report_files(run/'latest_metrics.json',result)
-            with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
-            if rank>best_rank:
-                best_rank=rank;profile['threshold']=chosen['threshold']
-                selection={'evaluated_on_val':True,'step':step,'metrics':chosen,'quality_pass':chosen['quality_pass']}
-                save('best.pt');report_files(run/'best_metrics.json',result)
-            print(f'Validation: precision={chosen["pixel_precision"]}, recall={chosen["vehicle_recall_ge32"]}, cabin={chosen["interior_false_paint_rate"]}, pass={chosen["quality_pass"]}',flush=True)
-            if chosen['quality_pass'] and tc.get('stop_on_quality_pass',False):
-                save('last.pt')
-                ledger.reconcile_wall_clock()
-                write_json(run/'status.json',{'step':step,'phase':phase,'stop_reason':'validation_quality_gate',
-                    'experiment_seconds':ledger.state['seconds'],'experiment_updates':ledger.state['updates']})
-                return run/'best.pt'
-        if transition:
-            if phase=='overfit':
-                write_json(run/'overfit_check.json',{'first_loss':first_loss,'last_loss':last_loss,'updates':phase_steps[phase],
-                    'seconds':phase_seconds[phase],'loss_decreased':last_loss<first_loss})
-                if not last_loss<first_loss:
-                    save('last.pt');raise RuntimeError('Overfit loss did not decrease; diagnose before further training')
-            save(phase+'_complete.pt');save('last.pt');phase='warmup' if phase=='overfit' else 'joint'
-            # Save after constructing the next phase stream, at the next update.
-        if step%tc['checkpoint_every']==0 or not ledger.can_start(180):
-            # A stage-transition checkpoint must describe its new data order accurately.
-            if active_phase==phase:save('last.pt')
-        if not ledger.can_start(tc.get('step_reserve_seconds',30)):
-            if active_phase==phase:save('last.pt')
-            break
+                if first_loss is None:first_loss=losses['total']
+                last_loss=losses['total']
+            row={'step':step,'phase':phase,**losses,'gradient_norm':float(norm),'phase_seconds':phase_seconds[phase],
+                 'experiment_seconds':ledger.state['seconds']}
+            with (run/'train.jsonl').open('a') as f:f.write(json.dumps(row,allow_nan=False)+'\n')
+            if step==1 or step%10==0:print(f'{phase} {step}: loss={losses["total"]:.4f}, used={ledger.state["seconds"]:.1f}s',flush=True)
+            transition=(phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800)) or (
+                        phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600))
+            if phase=='warmup' and step%tc['validate_every']==0 and can_train(120):
+                before=time.perf_counter();state=rng_state()
+                result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
+                seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'warmup_validation')
+                result.update(step=step,phase=phase,image_size=stage_config['image_size'],eligible_for_selection=False)
+                report_files(run/'warmup_metrics.json',result)
+                with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
+                print(f'Warmup validation: mask AP={result["raw_ap"]["mask_mAP"]:.4f}',flush=True)
+            if phase=='joint' and (step%tc['validate_every']==0 or not can_train(180)) and can_train(120):
+                before=time.perf_counter();state=rng_state()
+                result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
+                seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'validation')
+                chosen=result['selected'];rank=calibration_rank(chosen,chosen['mask_mAP'])
+                result.update(step=step,experiment_seconds=ledger.state['seconds']);report_files(run/'latest_metrics.json',result)
+                with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
+                if rank>best_rank:
+                    best_rank=rank;profile['threshold']=chosen['threshold']
+                    selection={'evaluated_on_val':True,'step':step,'metrics':chosen,'quality_pass':chosen['quality_pass']}
+                    save('best.pt');report_files(run/'best_metrics.json',result)
+                print(f'Validation: precision={chosen["pixel_precision"]}, recall={chosen["vehicle_recall_ge32"]}, cabin={chosen["interior_false_paint_rate"]}, pass={chosen["quality_pass"]}',flush=True)
+                if chosen['quality_pass'] and tc.get('stop_on_quality_pass',False):
+                    save('last.pt')
+                    ledger.reconcile_wall_clock()
+                    write_json(run/'status.json',{'step':step,'phase':phase,'stop_reason':'validation_quality_gate',
+                        'experiment_seconds':ledger.state['seconds'],'experiment_updates':ledger.state['updates']})
+                    return run/'best.pt'
+            if transition:
+                if phase=='overfit':
+                    write_json(run/'overfit_check.json',{'first_loss':first_loss,'last_loss':last_loss,'updates':phase_steps[phase],
+                        'seconds':phase_seconds[phase],'loss_decreased':last_loss<first_loss})
+                    if not last_loss<first_loss:
+                        save('last.pt');raise RuntimeError('Overfit loss did not decrease; diagnose before further training')
+                save(phase+'_complete.pt');save('last.pt')
+                if phase=='overfit' and tc.get('require_overfit_review'):
+                    ledger.reconcile_wall_clock()
+                    write_json(run/'status.json',{'step':step,'phase':phase,'stop_reason':'overfit_visual_review_required'})
+                    return run/'overfit_complete.pt'
+                phase='warmup' if phase=='overfit' else 'joint'
+                # Save after constructing the next phase stream, at the next update.
+            if step%tc['checkpoint_every']==0 or not can_train(180):
+                # A stage-transition checkpoint must describe its new data order accurately.
+                if active_phase==phase:save('last.pt')
+            if not can_train(tc.get('step_reserve_seconds',30)):
+                if active_phase==phase:save('last.pt')
+                break
+            ledger.reconcile_wall_clock()
+    except EvaluationBudgetExceeded:
+        restore_rng(state)
+        elapsed=time.perf_counter()-before;phase_seconds[phase]+=elapsed
+        ledger.charge(elapsed,0,'interrupted_validation')
+        if stream is not None and active_phase==phase:save('last.pt')
+    finally:
         ledger.reconcile_wall_clock()
     if stream is not None and active_phase==phase:save('last.pt')
     ledger.reconcile_wall_clock()

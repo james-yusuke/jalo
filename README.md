@@ -47,6 +47,63 @@ Mac／MPS、入力384×640、クラスしきい値0.3、マスクしきい値0.5
 これらの映像・画像も**CC BY-SA 4.0**で提供します。再利用する場合は、作者・元動画・ライセンスを表示し、変更点を明記してください。
 無料利用にはこの条件があり、著作権が放棄された動画ではありません。
 
+## 改善実験の準備状況（開発版）
+
+[開発版のソース・公開モデル・確認記録](https://github.com/james-yusuke/jalo/releases/tag/v0.2.0-alpha.1)を用意しました。
+**認識品質の改善はまだ完了していません。配布している重みは引き続き `v0.1.1` と同じCOCO学習済みモデルです。**
+
+この開発版では、現在の重みを車両ごとの局所マスク構成へ引き継ぐ処理、道路への誤着色の評価、動画単位のデータ分離、学習の再開処理を追加しました。
+Mac／MPSで重みの移植とマスク層への勾配、既存モデルでのMP4保存を確認しました。この動作確認は、認識精度の改善を示す実験ではありません。
+
+追加学習用として次の4動画を取得し、指定した時刻の340枚を抽出しました。作者名とライセンスは元の配布ページで確認できます。
+
+| 今後の用途 | 動画（元の配布ページ） | 作者・ライセンス | 抽出済み画像 |
+|---|---|---|---:|
+| 学習 | [I-495](https://commons.wikimedia.org/wiki/File:Driving_eastbound_on_I-495_from_the_I-270_Spur_to_Cedar_Lane_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
+| 学習 | [Broad Creek → Jennifer Road](https://commons.wikimedia.org/wiki/File:Driving_from_Broad_Creek_to_Jennifer_Road_in_Annapolis,_Maryland_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
+| 検証・しきい値選択 | [Leaman Farm Road → Game Preserve Road](https://commons.wikimedia.org/wiki/File:Driving_from_Leaman_Farm_Road_to_Game_Preserve_Road_in_Gaithersburg,_Maryland_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
+| 未学習の最終評価 | [原州市の運転動画](https://commons.wikimedia.org/wiki/File:2020-04-16_원주시_도로주행.webm) | Choi Kwang-mo・[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | 55枚 |
+
+米国の3動画は15秒から300秒未満、原州市は15秒から180秒未満を3秒間隔で抽出しています。
+各ページの「Original file」から無料で取得できます。[CC BY-SA 4.0の利用条件](https://creativecommons.org/licenses/by-sa/4.0/)に従い、再配布時には作者・出典・変更内容を表示してください。
+既に結果を見たI-495は次の学習用に選び、今後の未見評価には使用しません。
+
+**学習開始前の条件で停止しています。** 340枚すべての確認済み参照注釈が必要ですが、現時点ではI-495の4枚についてAI作成の輪郭と重畳表示を確認した段階です。
+輪郭の補助抽出には、車体とタイヤ下の影・道路を分離できない例がありました。未確認の注釈を学習用・評価用の正解として使用していません。
+新しい動画での追加学習、しきい値選択、最終評価、改善モデルの全編動画は未実施です。原州市の動画には予測を実行していません。
+新しい精度値や「実用的になった」という評価は掲載していません。
+
+<details>
+<summary>開発版で追加した研究用の実行手順</summary>
+
+この手順には、全画像の参照注釈と重畳表示の確認を完了したデータが必要です。添付の注釈例は4枚の途中成果であり、学習用データセットではありません。
+
+```bash
+python -m jalo prepare --dataset video-instances --root data/free_driving_adapt --sources data/free_driving_adapt/sources.json --annotations data/free_driving_adapt/annotations.json
+python -m jalo train --config configs/free_driving_adapt.yaml --initialize checkpoints/jalo-coco-vehicles.pt --device mps
+```
+
+初期化では公開モデルのバックボーン、ピクセル特徴、Attention、正規化、FFN、分類層を移します。
+矩形の補正出力はゼロ初期化し、移植した層を初期学習中に固定します。パラメータ14,252,556個／全15,156,129個を継承することを照合しました。
+過学習確認は学習画像8枚で行い、そのマスクと勾配の確認記録がそろうまで次の段階へ進みません。
+`--resume`では同じ設定・注釈・分割・予算記録を使い、モデル、optimizer、scheduler、乱数とデータ順を復元します。
+学習・評価を共有の8時間／50,000更新以内で管理し、最終検証と最終評価の時間も確保します。
+
+```bash
+python -m jalo evaluate --checkpoint runs/free_driving_adapt/model/best.pt --baseline checkpoints/jalo-coco-vehicles.pt --config configs/free_driving_adapt.yaml --split val --device mps
+python -m jalo evaluate --checkpoint runs/free_driving_adapt/model/validated.pt --baseline checkpoints/jalo-coco-vehicles.pt --config configs/free_driving_adapt.yaml --split test --device mps
+python -m jalo export --checkpoint runs/free_driving_adapt/model/validated.pt --output checkpoints/jalo-local-vehicles.pt
+```
+
+検証で描画設定を固定してから、旧モデルと改善モデルの最終比較を一度だけ実行します。
+着色画素Precision 90%、長辺32px以上の車両Recall 80%、背景・車内の誤着色率0.5%以下を目標とします。
+車内が映らない場合は該当指標を欠測扱いにし、最終評価の車両が100件未満なら判定を保留します。
+検出器とByteTrackを含む描画結果の両方で基準を満たした場合だけ、新構成の全編出力を許可します。
+推論用ファイルには設定と評価記録を保持し、元の注釈フォルダへの依存をなくします。
+**この手順全体による実データ学習・評価は、まだ完了していません。**
+
+</details>
+
 ## 自分の動画で試す
 
 ### 1. ファイルをダウンロードする

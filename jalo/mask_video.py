@@ -62,6 +62,23 @@ def mux_audio(video, source, destination, start, duration):
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
+def tracked_instances(outputs, transform, tracker, timestamp, classes, threshold=.3,
+                      mask_threshold=.5, foreground_only=True):
+    """Shared by video rendering and sequential evaluation, with identical ByteTrack input."""
+    prediction=decode({k:v for k,v in outputs.items() if k!='mask_logits'},[transform],.1,
+                      foreground_only=foreground_only)[0]
+    tracks=tracker.update(prediction,timestamp)
+    winners=outputs['logits'][0].argmax(-1).detach().cpu()
+    selected=[t for t in tracks if t['score']>=threshold and (not foreground_only or
+        int(winners[int(prediction['query_indices'][t['prediction_index']])])<len(classes))]
+    indices=[int(prediction['query_indices'][t['prediction_index']]) for t in selected]
+    masks=restore_masks(outputs,0,indices,transform,mask_threshold)
+    return [{'mask':mask.numpy(),'class_name':track['class_name'],'class_id':track['class_id'],
+             'score':track['score'],'track_id':track['track_id'],
+             'foreground_winner':int(winners[index])<len(classes)}
+            for track,mask,index in zip(selected,masks,indices)]
+
+
 def validate_full_export(checkpoint, final_test, settings):
     """Full exports must use the settings whose quality was actually measured."""
     identity = final_test.get('identity', {})
@@ -113,16 +130,17 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
         size = profile['image_size']
     if checkpoint['config'].get('architecture') == 'vehicle_roi_v2' and start_seconds == 0 and duration is None and (
             max_frames is None or max_frames >= capture.frame_count):
-        if checkpoint.get('inference_only'):
-            capture.release()
-            raise ValueError('ROI Release weights have no local final-test record; use --duration for a diagnostic preview')
-        lock = Path(checkpoint['config']['data_root']) / 'final_test_lock.json'
-        final = json.loads(lock.read_text()) if lock.exists() else {}
         try:
             settings={'threshold': threshold, 'mask_threshold': mask_threshold,
                 'foreground_only': foreground_only, 'image_size': size, 'alpha': alpha}
             if 'mask_projection' in profile:settings['mask_projection']=model.mask_projection
-            validate_full_export(checkpoint, final, settings)
+            if checkpoint.get('inference_only') or checkpoint.get('quality_certificate'):
+                from .certification import validate_certificate
+                validate_certificate(checkpoint,settings)
+            else:
+                lock = Path(checkpoint['config']['data_root']) / 'final_test_lock.json'
+                final = json.loads(lock.read_text()) if lock.exists() else {}
+                validate_full_export(checkpoint, final, settings)
         except ValueError:
             capture.release()
             raise
@@ -154,22 +172,8 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
                         "time_deltas":torch.tensor([[.2,.4]],device=device)}
                     outputs = (model(**inputs, mask_query_threshold=threshold)
                                if checkpoint['config'].get('architecture') == 'vehicle_roi_v2' else model(**inputs))
-                    # Decode boxes cheaply for both ByteTrack passes; restore only masks to render.
-                    prediction = decode({k:v for k,v in outputs.items() if k != 'mask_logits'}, [transform], .1,
-                                        foreground_only=foreground_only)[0]
-                    tracks = tracker.update(prediction, count/fps)
-                    # Standard research rendering uses the requested foreground score threshold.
-                    # Background-winner exclusion is an explicit, optional stricter view.
-                    winning_class = outputs['logits'][0].argmax(-1).detach().cpu()
-                    selected = [t for t in tracks if t['score'] >= threshold and (not foreground_only or
-                        int(winning_class[int(prediction['query_indices'][t['prediction_index']])]) < len(checkpoint['classes']))]
-                    indices = [int(prediction['query_indices'][t['prediction_index']]) for t in selected]
-                    masks = restore_masks(outputs,0,indices,transform,mask_threshold)
-                    instances = []
-                    for track, mask in zip(selected,masks):
-                        instances.append({"mask":mask.numpy(), "class_name":track['class_name'],
-                            "class_id":track['class_id'], "score":track['score'], "track_id":track['track_id'],
-                            "foreground_winner":int(winning_class[int(prediction['query_indices'][track['prediction_index']])]) < len(checkpoint['classes'])})
+                    instances=tracked_instances(outputs,transform,tracker,count/fps,checkpoint['classes'],
+                                                threshold,mask_threshold,foreground_only)
                     colored, rendered = paint_masks(frame, instances, alpha)
                     writer.write(colored)
                     log.write(json.dumps({"frame":count,"timestamp_seconds":count/fps,
