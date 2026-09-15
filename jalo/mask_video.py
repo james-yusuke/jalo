@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import torch
 
-from .encoding import H264Writer
+from .encoding import H264Writer, TimedVideoReader
 from .engine import checkpoint_model
 from .geometry import Letterbox
 from .metrics import decode, mask_rle, restore_masks
@@ -103,15 +103,8 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
     if not overwrite and (output.exists() or json_path.exists()):
         raise FileExistsError(f"Output exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    capture = cv2.VideoCapture(str(source))
-    if not capture.isOpened():
-        raise ValueError(f"Cannot decode {source}")
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    width, height = [round(capture.get(k)) for k in (cv2.CAP_PROP_FRAME_WIDTH,cv2.CAP_PROP_FRAME_HEIGHT)]
-    if not math.isfinite(fps) or fps <= 0 or width % 2 or height % 2:
-        capture.release()
-        raise ValueError("Input needs valid FPS and even dimensions for yuv420p")
-    capture.set(cv2.CAP_PROP_POS_MSEC, start_seconds*1000)
+    capture = TimedVideoReader(source, start_seconds, duration)
+    fps, width, height = capture.fps, capture.width, capture.height
     scale = min(1., max_edge / max(width,height))
     size = [math.ceil(height*scale/32)*32, math.ceil(width*scale/32)*32]
     # Fit within the strict long-edge limit, including padding.
@@ -119,7 +112,7 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
     if not explicit_size and 'image_size' in profile:
         size = profile['image_size']
     if checkpoint['config'].get('architecture') == 'vehicle_roi_v2' and start_seconds == 0 and duration is None and (
-            max_frames is None or max_frames >= capture.get(cv2.CAP_PROP_FRAME_COUNT)):
+            max_frames is None or max_frames >= capture.frame_count):
         if checkpoint.get('inference_only'):
             capture.release()
             raise ValueError('ROI Release weights have no local final-test record; use --duration for a diagnostic preview')
@@ -140,8 +133,7 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
     started = time.perf_counter()
     count = colored_frames = colored_instances = 0
     reached_end = False
-    source_probe = json.loads(subprocess.check_output([
-        shutil.which("ffprobe") or "ffprobe", "-v", "error", "-show_format", "-of", "json", str(source)]))
+    source_probe = capture.probe
     with tempfile.TemporaryDirectory(prefix='.jalo-masks-', dir=output.parent) as temp:
         temp = Path(temp)
         writer = H264Writer(temp/'silent.mp4', fps, (width,height))
@@ -152,7 +144,7 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
                     if not ok:
                         reached_end = True
                         break
-                    source_time = capture.get(cv2.CAP_PROP_POS_MSEC)/1000
+                    source_time = start_seconds + count / fps
                     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     transform = Letterbox.create(rgb, size)
                     image, padding = transform.image(rgb)
@@ -212,6 +204,7 @@ def demo_masks(input_path, checkpoint_path, output, device="auto", preview=True,
         "manifest_sha256":checkpoint.get("manifest_sha256"), "source_sha256":digest(source),
         "frames":count,"fps":fps,"duration_seconds":media_duration,"video_frame_duration_seconds":count/fps,"source_start_seconds":start_seconds,
         "colored_frames":colored_frames,"colored_instances":colored_instances,"alpha":alpha,
+        "input_timing":"ffmpeg_fps_resampling", "source_timestamp_basis":"resampled_timeline_seconds",
         "class_threshold":threshold,"mask_threshold":mask_threshold,"background_winners_excluded":foreground_only,"inference_size":size,
         "architecture":checkpoint['config'].get('architecture','jalo_v1'),
         "mask_projection":getattr(model,'mask_projection','dense_image'),

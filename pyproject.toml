@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jalo-research"
-version = "0.1.0"
+version = "0.1.1"
 description = "Causal gated temporal attention for driving video object detection"
 requires-python = ">=3.11"
 dependencies = [

@@ -2,12 +2,98 @@
 from __future__ import annotations
 
 import os
+import json
+import math
+from fractions import Fraction
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 import numpy as np
+
+
+class TimedVideoReader:
+    """Decode by presentation time, resampling VFR inputs onto a constant-rate timeline."""
+    def __init__(self, source, start=0., duration=None):
+        self.source = Path(source)
+        self.start, self.duration = start, duration
+        self.process = None
+        self.errors = None
+        self.closed = False
+        self.frame = 0
+        self.probe = json.loads(subprocess.check_output([
+            shutil.which('ffprobe') or 'ffprobe', '-v', 'error', '-show_streams',
+            '-show_format', '-of', 'json', str(self.source)]))
+        stream = next((s for s in self.probe['streams'] if s['codec_type'] == 'video'), None)
+        if stream is None:
+            raise ValueError('Input has no video stream')
+        self.fps = 0.
+        for key in ('avg_frame_rate', 'r_frame_rate'):
+            try:
+                rate = float(Fraction(stream.get(key, '0/1')))
+            except (ValueError, ZeroDivisionError):
+                continue
+            if math.isfinite(rate) and rate > 0:
+                self.fps = rate
+                break
+        self.width, self.height = stream['width'], stream['height']
+        rotation = next((s['rotation'] for s in stream.get('side_data_list', []) if 'rotation' in s), 0)
+        if abs(round(float(rotation))) % 180 == 90:
+            self.width, self.height = self.height, self.width
+        if not math.isfinite(self.fps) or self.fps <= 0 or self.width % 2 or self.height % 2:
+            raise ValueError('Input needs valid FPS and even dimensions for yuv420p')
+        self.source_duration = float(self.probe.get('format', {}).get('duration', 0))
+        self.frame_count = round(self.source_duration * self.fps)
+
+    def read(self):
+        if self.closed:
+            return False, None
+        if self.process is None:
+            self.errors = tempfile.TemporaryFile()
+            command = [shutil.which('ffmpeg') or 'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                       '-i', str(self.source), '-map', '0:v:0', '-an', '-sn']
+            if self.duration is not None:
+                command += ['-t', str(self.duration)]
+            # Resample before trimming: input seeking would discard a sparse VFR
+            # frame that remains visible across the requested start time.
+            timing = f'fps=fps={self.fps}:start_time=0:round=near,trim=start={self.start},setpts=PTS-STARTPTS'
+            command += ['-vf', timing,
+                        '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1']
+            try:
+                self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=self.errors)
+            except BaseException:
+                self.errors.close()
+                raise
+        data = self.process.stdout.read(self.width * self.height * 3)
+        if not data:
+            code = self.process.wait(timeout=30)
+            if code:
+                self.errors.seek(0)
+                detail = self.errors.read(8192).decode('utf-8', errors='replace')
+                self.release()
+                raise RuntimeError(f'FFmpeg video decoding failed: {detail}')
+            return False, None
+        if len(data) != self.width * self.height * 3:
+            self.release()
+            raise RuntimeError('FFmpeg returned an incomplete video frame')
+        self.frame += 1
+        return True, np.frombuffer(data, dtype=np.uint8).reshape(self.height, self.width, 3)
+
+    def release(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.terminate()
+            self.process.stdout.close()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+            self.errors.close()
 
 
 class H264Writer:
