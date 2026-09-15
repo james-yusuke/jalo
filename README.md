@@ -1,185 +1,159 @@
 # JALO
 
-運転動画に映る車両を見つけ、車体の予測マスクに半透明の色を重ねるPythonの研究プロジェクトです。
-対象は乗用車・トラック・バス。色は追跡IDごとにそろえ、検出枠は表示しません。
+運転動画に映る乗用車・トラック・バスを見つけ、**車体の予測輪郭に半透明の色を重ねる**Pythonの研究プロジェクトです。車両の追跡IDごとに色をそろえ、検出枠は表示しません。
 
-**現在のモデルは試作段階です。見逃しや背景への誤着色があり、実用的な認識品質には達していません。**
-以下に、無料で利用できる実際の運転動画での結果を掲載しています。
+現在は予備学習の段階です。無料の運転動画から作成した参照注釈で追加学習し、車両ごとの局所マスクを出せることを確認しました。**未学習動画での実用的な認識品質は、まだ確認できていません。**
 
-## まず結果を見る
+リポジトリとReleaseは非公開です。以下のリンクを開くには、アクセス権のあるGitHubアカウントでサインインしてください。
 
-[評価動画とモデルをダウンロード](https://github.com/james-yusuke/jalo/releases/tag/v0.1.1)
+## 結果とモデル
 
-同じ配布モデルを使い、学習に使用していない運転動画の3区間を処理しました。
-**評価結果：車両を安定して認識・分離できていません。** 近くの車両でも未着色になり、着色された場面では車間の道路まで塗る例がありました。
+[予備学習モデル・結果動画・確認記録をダウンロード](https://github.com/james-yusuke/jalo/releases/tag/v0.2.0-alpha.2)
 
-![無料の運転動画での比較。左は元映像、右はJALOの予測。未着色と、複数車両・背景をまとめて塗る失敗例。](assets/i495_comparison.jpg)
+`v0.1.1`のCOCO学習済み重みを継承し、車両の位置を推定する層、車両ごとの局所マスク層、道路などの背景を区別する層を追加学習しました。外部の検出・セグメンテーションモデルの重みは使用していません。
 
-左が元映像、右が予測です。事前に固定した9時刻を目視確認し、0:10・2:10の未着色例と4:18の誤着色例を掲載しています。
-4:18では、ひとつのマスクが複数の車両と車間の背景をまとめて塗っています。予測マスクを手で修正する処理は行っていません。
+![I-495：左は元映像、右は20枚で追加学習したモデルの予測。](assets/i495_preliminary20.jpg)
 
-| 元動画の区間 | 結果動画（各20秒） | 着色が発生したフレーム |
-|---|---|---:|
-| 0:00–0:20 | [MP4を見る・保存する](https://github.com/james-yusuke/jalo/releases/download/v0.1.1/i495_masks_000_020.mp4) | 3 / 600 |
-| 2:00–2:20 | [MP4を見る・保存する](https://github.com/james-yusuke/jalo/releases/download/v0.1.1/i495_masks_120_140.mp4) | 0 / 600 |
-| 4:00–4:20 | [MP4を見る・保存する](https://github.com/james-yusuke/jalo/releases/download/v0.1.1/i495_masks_240_260.mp4) | 213 / 600 |
+![混雑場面の失敗も残ります。左右の車両の見逃しや、中央の色が隣の車体へ広がる例。](assets/broad_preliminary20_failures.jpg)
 
-「着色が発生した」は、正しく認識できたという意味ではありません。ダウンロードが始まった場合は、保存したMP4を動画プレーヤーで開いてください。
+[高速道路の10秒動画](https://github.com/james-yusuke/jalo/releases/download/v0.2.0-alpha.2/i495_trained20_015_025.mp4)・[混雑場面の10秒動画](https://github.com/james-yusuke/jalo/releases/download/v0.2.0-alpha.2/broad_creek_trained20_060_070.mp4)
 
-合計60秒・1,800フレーム、出力1280×720／30fps／H.264、音声なしです。
-Mac／MPS、入力384×640、クラスしきい値0.3、マスクしきい値0.5、背景候補の除外あり、色の濃さ45%で評価しました。
-元動画のフレーム間隔が一定ではないため、映像の時刻を保ちながら30fpsへそろえて処理しています。
-全出力フレームの再読込、再生時間、記録された時刻との対応を確認しました。
-詳細な記録・9時刻の比較画像・フレームごとの予測は[Releaseの添付ファイル](https://github.com/james-yusuke/jalo/releases/tag/v0.1.1)から取得できます。
+車体に沿って色が付く例が増えましたが、車両の見逃し、一台が複数色に分かれる例、隣の車両へのはみ出しが残っています。
 
+上の画像・動画は**学習に使用した動画での動作確認**です。抽出した学習画像の間のフレームも含みますが、動画自体が学習用なので、未知の道路への認識性能を示すものではありません。推論には映像だけを渡しており、参照注釈や正解矩形で出力を修正していません。
 
-この動画に正解の車両マスクはありません。上の結果は動作と着色の目視評価であり、認識精度のAPやRecallを示すものではありません。
-動画を学習・モデル選択・しきい値調整には使っていません。
+### 以前のモデルとの違い
 
-## 使用した無料の運転動画
+以前の`v0.1.1`はCOCOだけで学習したモデルです。I-495の3区間を初めて処理した際は、見逃しや、複数の車両と道路をまとめて塗る失敗がありました。
 
-[Driving eastbound on I-495 from the I-270 Spur to Cedar Lane (1 June 2026)](https://commons.wikimedia.org/wiki/File:Driving_eastbound_on_I-495_from_the_I-270_Spur_to_Cedar_Lane_(1_June_2026).webm)
+![v0.1.1の失敗例。左は元映像、右は旧モデルの予測。](assets/i495_comparison.jpg)
 
-作者：**Illegitimate Barrister**。ライセンス：**[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)**。
-元動画は約5分、1280×720、音声なしです。上のリンクの「Original file」から無料で取得できます。
+[以前の結果動画とモデル](https://github.com/james-yusuke/jalo/releases/tag/v0.1.1)は保持しています。I-495は今回から学習用に使用しているため、新モデルの未学習評価には使いません。
 
-掲載した結果動画と比較画像は、この映像の一部を抽出し、JALOの予測色・比較用の配置や説明を加えたものです。
-これらの映像・画像も**CC BY-SA 4.0**で提供します。再利用する場合は、作者・元動画・ライセンスを表示し、変更点を明記してください。
-無料利用にはこの条件があり、著作権が放棄された動画ではありません。
+## 使っている無料の運転動画
 
-## 改善実験の準備状況（開発版）
+動画単位で用途を分離しています。作者・ライセンス・取得元・ファイルのハッシュと抽出時刻はReleaseの記録にも保存しています。
 
-[開発版のソース・公開モデル・確認記録](https://github.com/james-yusuke/jalo/releases/tag/v0.2.0-alpha.1)を用意しました。
-**認識品質の改善はまだ完了していません。配布している重みは引き続き `v0.1.1` と同じCOCO学習済みモデルです。**
-
-この開発版では、現在の重みを車両ごとの局所マスク構成へ引き継ぐ処理、道路への誤着色の評価、動画単位のデータ分離、学習の再開処理を追加しました。
-Mac／MPSで重みの移植とマスク層への勾配、既存モデルでのMP4保存を確認しました。この動作確認は、認識精度の改善を示す実験ではありません。
-
-追加学習用として次の4動画を取得し、指定した時刻の340枚を抽出しました。作者名とライセンスは元の配布ページで確認できます。
-
-| 今後の用途 | 動画（元の配布ページ） | 作者・ライセンス | 抽出済み画像 |
+| 用途 | 動画（元の配布ページ） | 作者・ライセンス | 計画した参照画像 |
 |---|---|---|---:|
 | 学習 | [I-495](https://commons.wikimedia.org/wiki/File:Driving_eastbound_on_I-495_from_the_I-270_Spur_to_Cedar_Lane_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
 | 学習 | [Broad Creek → Jennifer Road](https://commons.wikimedia.org/wiki/File:Driving_from_Broad_Creek_to_Jennifer_Road_in_Annapolis,_Maryland_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
 | 検証・しきい値選択 | [Leaman Farm Road → Game Preserve Road](https://commons.wikimedia.org/wiki/File:Driving_from_Leaman_Farm_Road_to_Game_Preserve_Road_in_Gaithersburg,_Maryland_(1_June_2026).webm) | Illegitimate Barrister・CC BY-SA 4.0 | 95枚 |
 | 未学習の最終評価 | [原州市の運転動画](https://commons.wikimedia.org/wiki/File:2020-04-16_원주시_도로주행.webm) | Choi Kwang-mo・[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | 55枚 |
 
-米国の3動画は15秒から300秒未満、原州市は15秒から180秒未満を3秒間隔で抽出しています。
-各ページの「Original file」から無料で取得できます。[CC BY-SA 4.0の利用条件](https://creativecommons.org/licenses/by-sa/4.0/)に従い、再配布時には作者・出典・変更内容を表示してください。
-既に結果を見たI-495は次の学習用に選び、今後の未見評価には使用しません。
+各ページの「Original file」から無料で取得できます。米国の3動画は15秒から300秒未満、原州市は15秒から180秒未満を3秒間隔で抽出しています。
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)の動画は、再利用時に作者・元動画・ライセンス・変更点の表示などが必要です。
+掲載した結果映像・比較画像・参照注釈もCC BY-SA 4.0で提供します。フレーム抽出、AIによる輪郭注釈、予測色、比較用の配置・説明を加えています。
 
-**学習開始前の条件で停止しています。** 340枚すべての確認済み参照注釈が必要ですが、現時点ではI-495の4枚についてAI作成の輪郭と重畳表示を確認した段階です。
-輪郭の補助抽出には、車体とタイヤ下の影・道路を分離できない例がありました。未確認の注釈を学習用・評価用の正解として使用していません。
-新しい動画での追加学習、しきい値選択、最終評価、改善モデルの全編動画は未実施です。原州市の動画には予測を実行していません。
-新しい精度値や「実用的になった」という評価は掲載していません。
+著作権を懸念された日本の右折動画と、その動画で追加学習した重みは、今回の学習・配布モデルに使用していません。
 
-<details>
-<summary>開発版で追加した研究用の実行手順</summary>
+## 学習データと確認できた範囲
 
-この手順には、全画像の参照注釈と重畳表示の確認を完了したデータが必要です。添付の注釈例は4枚の途中成果であり、学習用データセットではありません。
+追加学習に使った動画の参照注釈は、I-495の12枚とBroad Creekの8枚、合計**20枚・156台分**です。内訳はcar 138、truck 17、bus 1です。バンはcarに含めます。
+輪郭はAIが原画像から作成し、原画像と注釈の重畳表示を全20枚で確認しました。**独立した人手検証を受けた正解データではありません。** 判別できない車両はignore領域にし、道路や建物は背景として扱います。
 
-```bash
-python -m jalo prepare --dataset video-instances --root data/free_driving_adapt --sources data/free_driving_adapt/sources.json --annotations data/free_driving_adapt/annotations.json
-python -m jalo train --config configs/free_driving_adapt.yaml --initialize checkpoints/jalo-coco-vehicles.pt --device mps
-```
+既存のCOCO 2017公式trainの2,000枚（車両あり1,800枚／なし200枚）も継続して使用し、通常の追加学習ではCOCOと動画画像を1対1で混ぜています。少数画像への過学習確認だけは、動画の学習画像8枚で行いました。
 
-初期化では公開モデルのバックボーン、ピクセル特徴、Attention、正規化、FFN、分類層を移します。
-矩形の補正出力はゼロ初期化し、移植した層を初期学習中に固定します。パラメータ14,252,556個／全15,156,129個を継承することを照合しました。
-過学習確認は学習画像8枚で行い、そのマスクと勾配の確認記録がそろうまで次の段階へ進みません。
-`--resume`では同じ設定・注釈・分割・予算記録を使い、モデル、optimizer、scheduler、乱数とデータ順を復元します。
-学習・評価を共有の8時間／50,000更新以内で管理し、最終検証と最終評価の時間も確保します。
+以下は**学習に使った20枚での診断**です。ByteTrackを適用する前の予測であり、検証・最終評価の合格を示す数値ではありません。
 
-```bash
-python -m jalo evaluate --checkpoint runs/free_driving_adapt/model/best.pt --baseline checkpoints/jalo-coco-vehicles.pt --config configs/free_driving_adapt.yaml --split val --device mps
-python -m jalo evaluate --checkpoint runs/free_driving_adapt/model/validated.pt --baseline checkpoints/jalo-coco-vehicles.pt --config configs/free_driving_adapt.yaml --split test --device mps
-python -m jalo export --checkpoint runs/free_driving_adapt/model/validated.pt --output checkpoints/jalo-local-vehicles.pt
-```
+| 学習画像での診断 | 結果 |
+|---|---:|
+| 着色画素のPrecision | 98.39% |
+| 長辺32px以上・同一クラス・マスクIoU 0.5でのRecall | 97.44%（152 / 156台） |
+| 背景への誤着色率 | 0.202%（32,421 / 16,060,574画素） |
+| carの対応数 | 135 / 138台 |
+| truckの対応数 | 16 / 17台 |
+| busの対応数 | 1 / 1台 |
+| 長辺32px未満・車内の評価 | 対象なし／欠測 |
+| 未学習動画のAP・実用性判定 | 未実施 |
 
-検証で描画設定を固定してから、旧モデルと改善モデルの最終比較を一度だけ実行します。
-着色画素Precision 90%、長辺32px以上の車両Recall 80%、背景・車内の誤着色率0.5%以下を目標とします。
-車内が映らない場合は該当指標を欠測扱いにし、最終評価の車両が100件未満なら判定を保留します。
-検出器とByteTrackを含む描画結果の両方で基準を満たした場合だけ、新構成の全編出力を許可します。
-推論用ファイルには設定と評価記録を保持し、元の注釈フォルダへの依存をなくします。
-**この手順全体による実データ学習・評価は、まだ完了していません。**
+予備学習は8枚版の1,500更新を引き継ぎ、20枚版で1,592更新、合計3,092更新です。パラメータ数は15,156,129。FP32／MPSで学習し、マスク層の有限な勾配、保存・再開、推論用モデルの重みと出力の一致を確認しました。
 
-</details>
+10秒・300フレームの動画処理時間は、I-495が94.45秒、Broad Creekが129.00秒でした。いずれも1280×720・30fpsで保存し、全フレームの再読込、JSONLの時刻・RLE・色の対応、H.264／yuv420p／faststartを確認しました。この2本の元動画に音声はありません。
+
+340枚の画像抽出は完了しています。Release作成時点で参照注釈は131枚を確認済みです（学習用36枚、検証用95枚）。検証用95枚・456台分は予測を見る前に保存しました。残る学習用154枚と最終評価用55枚の注釈は作成中です。36枚版の追加学習も別のrunで進めていますが、このReleaseの配布モデルと上の結果は完了済みの20枚版です。先に確認済みの学習画像で予備学習を進める順序に変更しました。検証用と最終評価用の動画を学習には混ぜていません。
+この予備モデルは検証によるモデル選択・しきい値調整を行っていません。クラスしきい値0.3、局所マスクと車両前景のしきい値0.5、透明度45%を初期値として使用しています。
+
+実用性の判定には、未学習の検証・最終評価動画で、着色画素Precision 90%以上、長辺32px以上の車両Recall 80%以上、背景・車内への誤着色率0.5%以下をすべて満たす必要があります。何も塗らない結果は不合格です。最終評価の対象車両が100件未満なら判定を保留します。
+**この判定と最終評価動画の全編出力は未完了です。** 予備モデルからは短い確認動画を書き出せますが、合格したモデルとして全編出力することはできません。
 
 ## 自分の動画で試す
 
-### 1. ファイルをダウンロードする
+### 1. ダウンロードする
 
-- [ソースコードをZIPでダウンロード](https://github.com/james-yusuke/jalo/archive/refs/tags/v0.1.1.zip)して展開します。
-- [学習済みモデルをダウンロード（約60 MB）](https://github.com/james-yusuke/jalo/releases/download/v0.1.1/jalo-coco-vehicles.pt)します。展開したフォルダに`checkpoints`フォルダを作り、その中に置きます。
-- 処理したい動画を同じフォルダに置き、以下の例では`demo.webm`という名前にします。自分のMP4などの名前に読み替えても構いません。
+- [ソースコードのZIP](https://github.com/james-yusuke/jalo/archive/refs/tags/v0.2.0-alpha.2.zip)を保存して展開します。
+- [予備学習済みモデル](https://github.com/james-yusuke/jalo/releases/download/v0.2.0-alpha.2/jalo-local-vehicles-preliminary.pt)を保存します。展開したフォルダの中に`checkpoints`フォルダを作り、その中に置きます。
+- 処理する動画を同じフォルダに置きます。次の例では`demo.webm`とします。自分のMP4などの名前にも読み替えられます。
+
+推論にはこのモデルファイルだけを使います。学習用の画像やローカル注釈フォルダは必要ありません。
 
 ### 2. 実行環境を用意する
 
-[Python 3.11以上](https://www.python.org/downloads/)と[FFmpeg](https://ffmpeg.org/download.html)が必要です。FFmpegは`libx264`を含むものを使い、`ffmpeg`と`ffprobe`を実行できるようにしてください。
-ソースを展開したフォルダでターミナルを開き、次を実行します。
+[Python 3.11以上](https://www.python.org/downloads/)と[FFmpeg](https://ffmpeg.org/download.html)が必要です。FFmpegは`libx264`を含むものを使い、`ffmpeg`と`ffprobe`を実行できるようにします。ソースを展開したフォルダでターミナルを開きます。
 
 ```bash
 python -m venv .venv
 ```
 
-macOS／Linuxでは`source .venv/bin/activate`、Windows PowerShellでは`.venv\Scripts\Activate.ps1`で仮想環境を有効にします。
-macOSなどで`python`が見つからない場合は、`python3`に読み替えてください。
+macOS／Linuxは`source .venv/bin/activate`、Windows PowerShellは`.venv\Scripts\Activate.ps1`で仮想環境を有効にします。`python`が見つからない場合は`python3`に読み替えてください。
 
 ```bash
 python -m pip install .
 python -m jalo doctor
 ```
 
-### 3. 動画を処理する
-
-まず20秒間を処理する例です。
+### 3. 短い動画を書き出す
 
 ```bash
-python -m jalo demo --input demo.webm --checkpoint checkpoints/jalo-coco-vehicles.pt --render masks --foreground-only --duration 20 --output outputs/demo_masks.mp4 --device auto --no-preview
+python -m jalo demo --input demo.webm --checkpoint checkpoints/jalo-local-vehicles-preliminary.pt --render masks --duration 20 --output outputs/demo_masks.mp4 --device auto --no-preview
 ```
 
-`outputs/demo_masks.mp4`を開くと結果を再生できます。全編を処理する場合は`--duration 20`を外します。
-映像はH.264のMP4で保存し、元の音声があればAACで残します。色の濃さは45%です。
-`--no-preview`を外すと処理中に表示できます。Spaceで一時停止、Q／Escで終了します。
-同名のJSONLにはフレーム時刻、クラス、信頼度、追跡ID、予測マスクも保存します。
+`outputs/demo_masks.mp4`を開いて再生します。映像はH.264／yuv420p／faststartのMP4で保存し、元音声があればAACで残します。同名のJSONLにフレーム時刻・クラス・信頼度・追跡ID・マスクRLEも保存します。
 
-`--device auto`は利用できるGPUを選びます（CUDA → MacのMPS → CPU）。Mac／MPSで動作確認済み、CUDAは実機未検証です。
+モデルに保存した入力544×960としきい値を既定で使います。車両の矩形を塗り潰す処理や、マスクがない車両を枠で代用する処理はありません。ByteTrackによるIDごとの色を使用し、クエリ番号を追跡IDにはしません。
 
-## モデルと学習データ
+`--no-preview`を外すと処理中の映像を表示できます。Spaceで一時停止、Q／Escで終了します。
+`--device auto`はCUDA → MPS → CPUの順に選びます。Mac／MPSで学習・勾配・再開・動画保存を確認しました。CUDAはコードと分岐テストのみで、実機では未検証です。
 
-ImageNetで学習済みのResNet-18を特徴抽出に使用し、Attention、分類、矩形、マスクの各ヘッドをPyTorchで実装しています。
-既存の検出・セグメンテーションモデルの重みは使用していません。
+## モデルの構成と再現
 
-配布モデルはCOCO 2017公式trainから選んだ2,000枚（車両あり1,800枚／なし200枚）で学習した単一フレーム版です。
-公式valの別の300枚でモデルを選択しました。運転動画での追加学習は含みません。
-`v0.1.1`の重みは`v0.1.0`と同じで、今回の更新は動画の時刻処理の修正、運転動画での評価、案内の改善です。
+ImageNet学習済みResNet-18の特徴から、中心位置と初期矩形を予測し、位置付きクエリを作ります。192次元・6ヘッド・3層のAttentionが周辺の画像特徴を参照して位置と分類を補正します。各車両の周辺特徴を28×28で取り出し、共有の畳み込み層から56×56の輪郭を出します。
 
-| COCO検証画像300枚での指標 | 結果 |
-|---|---:|
-| 矩形AP | 1.03% |
-| マスクAP | 4.66% |
-
-これは1,500更新時点・入力384×640のCOCO形式APです。上の運転動画に対する精度ではありません。
-学習設定、画像ID、評価値、ファイルの照合用ハッシュは[Release](https://github.com/james-yusuke/jalo/releases/tag/v0.1.1)に添付しています。
-配布モデルは推論用で、学習状態の完全再開に必要なoptimizer等は含みません。
+ピクセル特徴、Attention、正規化、FFN、分類などを`v0.1.1`から継承しました。絶対座標の矩形出力を補正量に流用せず、最初の移植では補正出力をゼロに初期化しています。以後の注釈追加では、学習済みの局所マスクと矩形補正も含めて継承します。対応する名前・形状・役割、初期化した層はReleaseの移植記録に保存しています。
 
 <details>
-<summary>学習・研究用のコマンド</summary>
+<summary>学習と評価の実行手順</summary>
+
+Releaseには設定、参照注釈、データ選択、乱数・optimizer・scheduler・データ順を含む再開用チェックポイント、共有の学習時間記録を添付しています。元動画とCOCOは各配布元から取得します。配布モデルが使用した20枚の注釈と、途中まで確認した36枚の学習用注釈・95枚の検証用注釈を、版を分けて保存しています。340枚の完成した評価データセットではありません。
+
+最初の8枚版を準備・学習する例です。入力ファイルの配置はReleaseの `reproduction_bundle.zip` 内の案内に記載しています。
 
 ```bash
-python -m jalo prepare --dataset coco-instances --root data/coco_vehicle
-python -m jalo train --config configs/vehicle_masks.yaml --variant single --run-dir runs/coco_new --device auto
-python -m jalo evaluate --checkpoint checkpoints/jalo-coco-vehicles.pt --config configs/vehicle_masks.yaml --split val --device auto
-python -m jalo export --checkpoint runs/coco_new/best.pt --output checkpoints/my-model.pt
+python -m jalo prepare --dataset video-instances --root data/free_driving_adapt --sources data/free_driving_adapt/sources.json --annotations data/free_driving_adapt/preliminary_annotations.json --preliminary
+python -m jalo train --config configs/free_driving_preliminary.yaml --initialize checkpoints/jalo-coco-vehicles.pt --device mps
 ```
 
-Releaseの`training_config.yaml`が元の学習設定です。リポジトリの設定は新規実験用に上限を10,000更新／3時間にしています。
-時間Attentionの比較用に`single`／`temporal`／`gated`と`configs/mac_small.yaml`／`configs/full.yaml`も含みます。
-BDD100Kでの実データ比較は未実施です。独自実装と学術的な新規性は別であり、YOLOに対する優位性を主張しません。
+20枚版へ移る場合は、別のmanifest名とrunフォルダを使います。
+
+```bash
+python -m jalo prepare --dataset video-instances --root data/free_driving_adapt --sources data/free_driving_adapt/sources.json --annotations data/free_driving_adapt/preliminary_annotations_r4.json --preliminary --manifest-name preliminary_manifest_r4.json
+python -m jalo train --config configs/free_driving_preliminary_expanded.yaml --initialize runs/free_driving_adapt/preliminary/last.pt --device mps
+```
+
+少数画像への過学習確認では、損失だけでなく出力マスクの目視確認も必要です。再開用ファイルには、その確認記録も含めています。`--initialize`は学習済み重みを引き継いで新しい実験を始め、optimizerとデータ順を初期化します。`--resume`は同じ注釈・分割・設定の状態を完全に復元するために使います。注釈の版を変えた再開や、学習時間のリセットは拒否します。
+
+全参照注釈がそろった段階で、`configs/free_driving_adapt.yaml`による検証・しきい値選択と、一度だけの最終比較を行います。予備チェックポイントには評価未完了の識別情報を保存しており、最終評価済みのモデルとして扱うことはできません。
+
+AdamW、独自層`1e-4`・バックボーン`1e-5`、weight decay `1e-4`、FP32、バッチ1・勾配累積4、勾配クリップ0.1を使用します。BatchNormの統計は固定します。共有の上限は学習・評価合計8時間／50,000更新です。
+
+旧モデルのCOCO公式val 300枚での計測値は矩形AP 1.03%、マスクAP 4.66%でした。これは`v0.1.1`・入力384×640・1,500更新の値で、今回の局所マスクモデルや運転動画の成績ではありません。[以前の設定と評価記録](https://github.com/james-yusuke/jalo/releases/tag/v0.1.1)を保持しています。
+
+時間Attention比較用の`single`／`temporal`／`gated`とBDD100K用の設定も保持しています。今回の追加学習は単一フレーム版だけです。BDD100Kの実データ比較は未実施で、YOLOへの優位性や学術的新規性は主張しません。
 
 </details>
 
 ## ライセンス
 
-ソースコードは[MIT License](LICENSE)です。掲載した運転動画の加工結果・比較画像は前述のCC BY-SA 4.0です。
-データと外部の事前学習済み重みは各提供元の条件を参照してください。[COCOの利用条件](https://cocodataset.org/#termsofuse)も確認してください。
-学習データ・元動画・モデルの重み・`scripts/`・`docs/`はGitに含めず、配布モデルと結果動画はReleaseに置いています。
+ソースコードは[MIT License](LICENSE)です。掲載した運転動画の加工結果・比較画像・参照注釈は前述のCC BY-SA 4.0で提供します。外部データ・事前学習済み重みは各提供元の条件を参照してください。[COCOの利用条件](https://cocodataset.org/#termsofuse)も確認してください。
+
+`scripts/`・`docs/`・学習データ・モデルの重みはGitに含めません。モデルと結果はタグ付きReleaseに添付し、既存のモデルとReleaseも保持しています。

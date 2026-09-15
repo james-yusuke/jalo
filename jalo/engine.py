@@ -113,6 +113,8 @@ def export_checkpoint(source, destination):
         exported['initialization']=copy.deepcopy(checkpoint['initialization'])
     for key in ('annotations_sha256','coco_manifest_sha256'):
         if key in checkpoint:exported[key]=checkpoint[key]
+    for key in ('preliminary','reference_coverage','evaluation_eligible','experiment_seconds','experiment_updates'):
+        if key in checkpoint:exported[key]=copy.deepcopy(checkpoint[key])
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + '.tmp')
     torch.save(exported, temporary)

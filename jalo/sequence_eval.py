@@ -109,6 +109,8 @@ def compare_final(checkpoint_path, baseline_path, config, device, output=None):
     from .runtime import digest, write_json
     root=Path(config['data_root']);lock=root/'final_test_lock.json'
     model,cp=checkpoint_model(checkpoint_path,device)
+    if cp.get('preliminary') or config.get('preliminary'):
+        raise ValueError('Complete the reference dataset before final comparison; preliminary checkpoints are not eligible')
     baseline,old=checkpoint_model(baseline_path,device)
     if config.get('initialization_sha256')!=old['loaded_sha256']:
         raise ValueError('Final comparison baseline must be the pinned public model')
@@ -170,6 +172,8 @@ def freeze_validation(checkpoint_path,baseline_path,config,device,output=None):
     destination=run/'validated.pt';frozen_path=run/'validation_frozen.json'
     if destination.exists() or frozen_path.exists():raise FileExistsError('Validation selection already frozen in this run')
     model,cp=checkpoint_model(checkpoint_path,device);baseline,old=checkpoint_model(baseline_path,device)
+    if cp.get('preliminary') or config.get('preliminary'):
+        raise ValueError('Complete the reference dataset before validation selection; preliminary checkpoints are not eligible')
     if old['loaded_sha256']!=config.get('initialization_sha256') or cp['manifest_sha256']!=digest(config['manifest']):
         raise ValueError('Validation requires the pinned public baseline and the training manifest')
     ledger=ExperimentBudget(config['budget_ledger'],config['train']['max_seconds'],config['train']['max_updates'])

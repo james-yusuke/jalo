@@ -83,7 +83,7 @@ def annotation_identity(image, annotations):
     return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
 
 
-def prepare_videos(root, sources, annotations, overwrite=False):
+def prepare_videos(root, sources, annotations, overwrite=False, preliminary=False, manifest_name=None):
     """Validate whole-video splits and reviewed COCO polygons without running a model.
 
     Source spec: sources[{id,path,sha256,split,intervals,stride_seconds,fps,
@@ -93,7 +93,9 @@ def prepare_videos(root, sources, annotations, overwrite=False):
     import math
     import numpy as np
     root=Path(root).resolve();sources=Path(sources).resolve();annotations=Path(annotations).resolve()
-    destination=root/'manifest.json'
+    destination=contained_path(root,manifest_name or ('preliminary_manifest.json' if preliminary else 'manifest.json'))
+    if destination in (sources,annotations) or destination.suffix!='.json':
+        raise ValueError('Use a separate JSON manifest destination')
     if destination.exists() and not overwrite:raise FileExistsError(destination)
     spec=json.loads(sources.read_text());labels=json.loads(annotations.read_text())
     if labels['info'].get('sources_sha256')!=digest(sources):raise ValueError('Annotation sources changed')
@@ -123,7 +125,11 @@ def prepare_videos(root, sources, annotations, overwrite=False):
     images=labels['images'];ids={im['id'] for im in images}
     if len(ids)!=len(images):raise ValueError('Duplicate image identity')
     keys=[(im['source_id'],im['second']) for im in images]
-    if len(keys)!=len(set(keys)) or set(keys)!=set(expected):raise ValueError('Missing or duplicate fixed source frames')
+    if len(keys)!=len(set(keys)):raise ValueError('Duplicate fixed source frames')
+    if preliminary:
+        if not keys or not set(keys)<=set(expected):raise ValueError('Preliminary frames must belong to the fixed selection')
+        if any(expected[key]!='train' for key in keys):raise ValueError('Preliminary references must be training videos only')
+    elif set(keys)!=set(expected):raise ValueError('Missing or duplicate fixed source frames')
     review={r['image_id']:r for r in labels['review']}
     if len(review)!=len(labels['review']) or set(review)!=ids:raise ValueError('Missing or duplicate annotation review')
     by_image=defaultdict(list);ann_ids=set()
@@ -167,11 +173,17 @@ def prepare_videos(root, sources, annotations, overwrite=False):
                          'bbox':a['bbox'],'segmentation':a['segmentation'],'iscrowd':0,'area':int(mask.sum())})
         splits[split].append({**im,'path':im['file_name'],'annotations':anns})
     for values in splits.values():values.sort(key=lambda im:(im['source_id'],im['frame_index']))
-    if any(not values for values in splits.values()):raise ValueError('Every split must contain reviewed frames')
+    if not preliminary and any(not values for values in splits.values()):raise ValueError('Every split must contain reviewed frames')
     manifest={'format_version':4,'dataset':'video_vehicle_instances','task':'instance_segmentation',
         'classes':list(VEHICLES),'seed':spec.get('seed',0),'split_unit':'source_video','sources':list(by_source.values()),
         'sources_sha256':digest(sources),'annotations_sha256':digest(annotations),
         'annotation_provenance':labels['info']['annotation_provenance'],'splits':splits}
+    if preliminary:
+        manifest.update(preliminary=True,annotations_file=str(annotations.relative_to(root)),
+            reference_coverage={'required_frames':len(expected),'reviewed_frames':len(images),
+                'missing_frames':[{'source_id':s,'second':t,'split':expected[(s,t)]}
+                                  for s,t in sorted(set(expected)-set(keys))]},
+            evaluation_eligible=False)
     for split,values in splits.items():
         manifest[split+'_distribution']=dict(Counter(VEHICLES[a['label']] for im in values for a in im['annotations']))
     write_json(destination,manifest);return destination

@@ -99,6 +99,8 @@ def report_files(path,result):
 
 def evaluate_adaptation_checkpoint(model,checkpoint,path,config,split,device,output):
     if split not in ('train','val','test'):raise ValueError('Unknown adaptation split')
+    if checkpoint.get('preliminary') and split!='train':
+        raise ValueError('Preliminary checkpoints have incomplete references; validation/test selection is not available')
     if config.get('initialization_sha256') and split=='test':
         raise ValueError('This experiment requires the one-time paired final comparison: use --baseline with --split test')
     if digest(config['manifest'])!=checkpoint['manifest_sha256']:
@@ -177,11 +179,17 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
         raise ValueError('An even effective batch is required for equal COCO/video sampling')
     manifest=digest(config['manifest']);coco_sha=digest(config['coco_manifest'])
     video_manifest=json.loads(Path(config['manifest']).read_text())
+    preliminary=bool(video_manifest.get('preliminary'))
+    if preliminary!=bool(config.get('preliminary')):
+        raise ValueError('Preliminary training requires an explicit preliminary config and manifest')
+    if preliminary and (not video_manifest['splits']['train'] or any(video_manifest['splits'][s] for s in ('val','test'))):
+        raise ValueError('Preliminary training must contain training references only')
     ann=video_manifest['annotations_sha256']
     if video_manifest.get('format_version')==4:
         # Bind this run to the frozen source specification and reviewed image bytes.
         source_spec=Path(config['data_root'])/'sources.json'
-        annotation_path=Path(config['data_root'])/'annotations.json'
+        from .data import contained_path
+        annotation_path=contained_path(config['data_root'],video_manifest.get('annotations_file','annotations.json'))
         if digest(source_spec)!=video_manifest['sources_sha256'] or digest(annotation_path)!=ann:
             raise ValueError('Source specification or reference annotations changed since preparation')
         # The full image/overlay review was verified by prepare; check its frozen image bytes again.
@@ -192,8 +200,17 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                     raise ValueError('A reviewed frame changed since preparation')
     checkpoint=load_checkpoint(resume) if resume else None
     initial=load_checkpoint(initialize) if initialize else None
-    if initial and config.get('initialization_sha256') and initial['loaded_sha256']!=config['initialization_sha256']:
+    continuation=bool(initial and initial.get('preliminary') and initial.get('architecture')=='vehicle_roi_v2')
+    initial_origin=(initial.get('initialization',{}).get('source_checkpoint_sha256') if continuation else
+                    initial['loaded_sha256'] if initial else None)
+    if initial and config.get('initialization_sha256') and initial_origin!=config['initialization_sha256']:
         raise ValueError('Initialization differs from the pinned public checkpoint')
+    if continuation:
+        saved_budget=initial.get('budget')
+        if not saved_budget or (ledger.state['updates']<saved_budget['updates'] or
+            ledger.state['seconds']<saved_budget['seconds'] or
+            ledger.state['events'][:len(saved_budget['events'])]!=saved_budget['events']):
+            raise ValueError('Annotation-revision continuation requires the original shared training budget')
     if config.get('initialization_sha256') and not (initial or checkpoint):
         raise ValueError('This experiment requires --initialize with its pinned public model')
     if checkpoint:
@@ -212,10 +229,10 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                 'note':'Model/optimizer/data/RNG state restored; numerical training across backends is not bitwise equivalent.'})
     model=build_model(config,'single',pretrained=False if checkpoint or initial else None).to(device).train()
     if checkpoint:model.load_state_dict(checkpoint['model'])
-    from .initialization import initialize_roi, freeze_inherited
+    from .initialization import initialize_roi, continue_preliminary_roi, freeze_inherited
     inheritance=checkpoint.get('initialization',{}) if checkpoint else {}
     if initial:
-        inheritance=initialize_roi(model,initial)
+        inheritance=(continue_preliminary_roi if continuation else initialize_roi)(model,initial)
         write_json(run/'initialization.json',inheritance)
     backbone=[];other=[]
     for name,p in model.named_parameters():
@@ -258,6 +275,10 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
             'selection':selection,'manifest_sha256':manifest,'annotations_sha256':ann,'coco_manifest_sha256':coco_sha,
             'budget':ledger.state,'environment':environment(),'first_overfit_loss':first_loss,'last_overfit_loss':last_loss,
             'initialization':inheritance}
+        state.update(experiment_seconds=ledger.elapsed_seconds(),experiment_updates=ledger.state['updates'])
+        if preliminary:
+            state.update(preliminary=True,reference_coverage=video_manifest['reference_coverage'],
+                         evaluation_eligible=False)
         tmp=run/(name+'.tmp');torch.save(state,tmp);os.replace(tmp,run/name)
     print(f'Adaptation: device={device}, update={step}, shared remaining={ledger.remaining():.1f}s',flush=True)
     if resume and (run/'train.jsonl').exists():
@@ -268,7 +289,11 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                 for row in abandoned:f.write(json.dumps(row)+'\n')
             (run/'train.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in entries if row['step']<=step))
     final_reserve=float(tc.get('final_evaluation_reserve_seconds',0))+float(tc.get('final_validation_reserve_seconds',0))
-    def can_train(reserve=30):return ledger.can_start(final_reserve+reserve)
+    def can_train(reserve=30):
+        if preliminary and (step>=tc.get('preliminary_max_updates',1500) or
+                            sum(phase_seconds.values())>=tc.get('preliminary_max_seconds',3600)):
+            return False
+        return ledger.can_start(final_reserve+reserve)
     def reviewed_overfit():
         path=run/'overfit_review.json';completed=run/'overfit_complete.pt'
         if not path.exists() or not completed.exists():return False
@@ -324,7 +349,7 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
             if step==1 or step%10==0:print(f'{phase} {step}: loss={losses["total"]:.4f}, used={ledger.state["seconds"]:.1f}s',flush=True)
             transition=(phase=='overfit' and (phase_steps[phase]>=tc.get('overfit_updates',200) or phase_seconds[phase]>=1800)) or (
                         phase=='warmup' and (phase_steps[phase]>=tc.get('warmup_updates',1000) or phase_seconds[phase]>=3600))
-            if phase=='warmup' and step%tc['validate_every']==0 and ledger.can_evaluate(final_reserve+120):
+            if not preliminary and phase=='warmup' and step%tc['validate_every']==0 and ledger.can_evaluate(final_reserve+120):
                 before=time.perf_counter();state=rng_state()
                 result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
                 seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'warmup_validation')
@@ -332,7 +357,7 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                 report_files(run/'warmup_metrics.json',result)
                 with (run/'evaluations.jsonl').open('a') as f:f.write(json.dumps(result,allow_nan=False)+'\n')
                 print(f'Warmup validation: mask AP={result["raw_ap"]["mask_mAP"]:.4f}',flush=True)
-            if phase=='joint' and (step%tc['validate_every']==0 or not can_train(180)) and ledger.can_evaluate(final_reserve+120):
+            if not preliminary and phase=='joint' and (step%tc['validate_every']==0 or not can_train(180)) and ledger.can_evaluate(final_reserve+120):
                 before=time.perf_counter();state=rng_state()
                 result=evaluate_adaptation(model,dataset_for(stage_config,'val'),device,ledger=ledger,deadline_reserve=final_reserve);restore_rng(state)
                 seconds=time.perf_counter()-before;phase_seconds[phase]+=seconds;ledger.charge(seconds,0,'validation')
@@ -380,6 +405,7 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
     if stream is not None and active_phase==phase:save('last.pt')
     ledger.reconcile_wall_clock()
     write_json(run/'status.json',{'step':step,'phase':phase,'phase_seconds':phase_seconds,'phase_steps':phase_steps,
-        'experiment_seconds':ledger.state['seconds'],'experiment_updates':ledger.state['updates'],'stop_reason':'shared_budget',
+        'experiment_seconds':ledger.state['seconds'],'experiment_updates':ledger.state['updates'],
+        'stop_reason':'preliminary_limit' if preliminary and ledger.can_start(final_reserve+30) else 'shared_budget',
         'selected_checkpoint_exists':(run/'best.pt').exists()})
     return run/('best.pt' if (run/'best.pt').exists() else 'last.pt')

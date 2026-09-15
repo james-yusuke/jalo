@@ -56,6 +56,43 @@ def initialize_roi(model, checkpoint):
 
 def freeze_inherited(model, report, freeze):
     """Warmup freezes precisely the migrated parameters, including shared heads."""
-    inherited = {row['target'] for row in report.get('transferred', [])}
+    inherited = set(report.get('warmup_frozen_targets',[row['target'] for row in report.get('transferred', [])]))
     for name, parameter in model.named_parameters():
         parameter.requires_grad_(not (freeze and name in inherited))
+
+
+def continue_preliminary_roi(model, checkpoint):
+    """Start a new annotation revision from learned local masks, preserving box deltas.
+
+    This initializes weights only. Exact optimizer/data-order restoration remains
+    the responsibility of --resume with its unchanged manifest.
+    """
+    import copy
+    previous=checkpoint.get('initialization',{})
+    if (not checkpoint.get('preliminary') or checkpoint.get('architecture')!='vehicle_roi_v2' or
+        getattr(model,'architecture',None)!='vehicle_roi_v2' or checkpoint.get('step',0)<1 or
+        checkpoint.get('task')!='instance_segmentation' or checkpoint.get('variant')!='single' or
+        checkpoint.get('classes')!=['car','truck','bus'] or not previous.get('source_checkpoint_sha256')):
+        raise ValueError('Continuation requires a trained preliminary ROI checkpoint with public-model lineage')
+    cfg=checkpoint['config']
+    if (cfg['model']['heads']!=model.decoder[0].heads or cfg['model']['queries']!=model.queries or
+        cfg.get('mask_projection','dense')!=model.mask_projection or
+        cfg.get('mask_objective','global')!=model.mask_objective or
+        cfg.get('foreground_supervision','feature')!=model.foreground_supervision):
+        raise ValueError('Continuation model semantics differ')
+    source,target=checkpoint['model'],model.state_dict()
+    if set(source)!=set(target) or any(source[n].shape!=target[n].shape or not torch.isfinite(source[n]).all() for n in target):
+        raise ValueError('Incompatible continued ROI weights')
+    model.load_state_dict(source,strict=True)
+    frozen=previous.get('warmup_frozen_targets',[r['target'] for r in previous['transferred']])
+    chain=copy.deepcopy(previous.get('continuation_chain',[]))
+    chain.append({'checkpoint_sha256':checkpoint.get('loaded_sha256'),
+                  'manifest_sha256':checkpoint['manifest_sha256'],'step':checkpoint['step']})
+    return {'source_checkpoint_sha256':previous['source_checkpoint_sha256'],
+            'parent_checkpoint_sha256':checkpoint.get('loaded_sha256'),
+            'source_architecture':'vehicle_roi_v2','target_architecture':'vehicle_roi_v2',
+            'transferred':[{'source':n,'target':n,'shape':list(t.shape),'role':'continued local model'} for n,t in source.items()],
+            'initialized':[],'unused_source_keys':[],'warmup_frozen_targets':frozen,
+            'continuation_chain':chain,'optimizer_restored':False,
+            'transferred_parameters':sum(p.numel() for p in model.parameters()),
+            'total_parameters':sum(p.numel() for p in model.parameters())}

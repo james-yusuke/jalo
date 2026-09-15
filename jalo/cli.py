@@ -22,6 +22,8 @@ def parser():
     prep.add_argument("--seed", type=int, default=0)
     prep.add_argument("--instructions", action="store_true")
     prep.add_argument("--overwrite", action="store_true")
+    prep.add_argument("--preliminary", action="store_true", help="Prepare reviewed training-only references; not eligible for validation or test")
+    prep.add_argument("--manifest-name", help="Multi-video manifest filename under --root; preserve old annotation revisions")
     for name in ("train", "experiment"):
         p = sub.add_parser(name)
         p.add_argument("--config", default="configs/mac_small.yaml")
@@ -89,8 +91,12 @@ def main():
                 if bool(args.input)==bool(args.sources) or not args.annotations:
                     raise ValueError("video-instances requires exactly one of --input / --sources and --annotations reviewed.json")
                 prepare_function=prepare_videos if args.sources else prepare_video
-                print(json.dumps({"manifest":str(prepare_function(args.root or 'data/video_instances',args.sources or args.input,args.annotations,args.overwrite))}))
+                if args.preliminary and not args.sources:raise ValueError('--preliminary requires --sources with fixed whole-video splits')
+                if args.manifest_name and not args.sources:raise ValueError('--manifest-name requires --sources')
+                options={'preliminary':args.preliminary,'manifest_name':args.manifest_name} if args.sources else {}
+                print(json.dumps({"manifest":str(prepare_function(args.root or 'data/video_instances',args.sources or args.input,args.annotations,args.overwrite,**options))}))
                 return
+            if args.preliminary or args.manifest_name:raise ValueError('--preliminary / --manifest-name require --dataset video-instances')
             args.root = args.root or ("data/coco_vehicle" if args.dataset == "coco-instances" else "data/bdd100k")
             from .data import DOWNLOAD_GUIDE, prepare
             if args.dataset == "coco-instances":
