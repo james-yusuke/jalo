@@ -1,0 +1,29 @@
+seed: 0
+seeds: [0, 1, 2]
+device: auto
+data_root: data/bdd100k
+manifest: data/bdd100k/manifest_full.json
+output_root: runs/full
+image_size: [384, 640]
+pretrained: true
+model:
+  dim: 192
+  heads: 6
+  layers: 3
+  queries: 100
+  memory_grid: [12, 20]
+  history_seconds: [0.2, 0.4]
+train:
+  batch_size: 1
+  accumulation: 8
+  bootstrap_steps: null
+  branch_steps: null
+  bootstrap_epochs: 100
+  branch_epochs: 50
+  lr: 0.0001
+  backbone_lr: 0.00001
+  weight_decay: 0.0001
+  clip_grad: 0.1
+  validate_every: 1000
+  checkpoint_every: 100
+  flip_probability: 0.5

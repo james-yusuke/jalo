@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jalo-research"
+version = "0.1.0"
+description = "Causal gated temporal attention for driving video object detection"
+requires-python = ">=3.11"
+dependencies = [
+  "torch>=2.8,<3", "torchvision>=0.23,<0.30", "numpy>=2,<3",
+  "scipy>=1.14,<2", "PyYAML>=6,<7", "Pillow>=11,<13",
+  "opencv-python>=4.11,<5", "pycocotools>=2.0.10,<3",
+  "trackers>=2,<3", "supervision>=0.27,<0.30",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+jalo = "jalo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jalo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

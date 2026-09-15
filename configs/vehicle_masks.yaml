@@ -1,0 +1,33 @@
+seed: 0
+device: mps
+task: instance_segmentation
+classes: [car, truck, bus]
+data_root: data/coco_vehicle
+manifest: data/coco_vehicle/manifest.json
+output_root: runs
+image_size: [384, 640]
+pretrained: true
+model:
+  task: instance_segmentation
+  mask_positions: true
+  mask_box_prior: false
+  num_classes: 3
+  dim: 192
+  heads: 6
+  layers: 3
+  queries: 100
+  memory_grid: [12, 20]
+  history_seconds: [0.2, 0.4]
+train:
+  batch_size: 1
+  accumulation: 4
+  bootstrap_steps: 10000
+  branch_steps: 10000
+  max_seconds: 10800
+  lr: 0.0001
+  backbone_lr: 0.00001
+  weight_decay: 0.0001
+  clip_grad: 0.1
+  validate_every: 250
+  checkpoint_every: 250
+  flip_probability: 0.5
