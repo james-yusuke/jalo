@@ -158,15 +158,15 @@ class CocoVehicles(Dataset):
         transform = Letterbox.create(rgb, self.image_size)
         image, padding = transform.image(rgb)
         crowd_masks = []
+        polygon_ignore_masks = []
         ignore_mask = np.zeros((h, w), bool)
         if im.get("ignore_polygons"):
             ignore_mask = annotation_mask(im["ignore_polygons"], h, w)
             if flip: ignore_mask = np.ascontiguousarray(ignore_mask[:, ::-1])
-            for label in range(len(self.classes)):
-                crowd_masks.append((ignore_mask.copy(), label))
-                crowd_areas.append(int(ignore_mask.sum()))
             # Keep each ambiguous region separate for classification ignore IoA.
             for polygon in im['ignore_polygons']:
+                region = annotation_mask([polygon], h, w)
+                polygon_ignore_masks.append(np.ascontiguousarray(region[:, ::-1]) if flip else region)
                 xy=np.asarray(polygon).reshape(-1,2)
                 lo,hi=xy.min(0),xy.max(0)
                 box=[lo[0],lo[1],hi[0],hi[1]]
@@ -200,7 +200,8 @@ class CocoVehicles(Dataset):
         target = {"boxes": transform.boxes_to_model(boxes), "labels": torch.tensor(labels, dtype=torch.long),
                   "masks": mask_tensor, "mask_valid": valid_pixels, "original_masks": original_masks, "original_areas": areas, "crowd_areas": crowd_areas,
                   "original_boxes": boxes, "ignore_boxes": ignored, "ignore_model_boxes": transform.boxes_to_model(ignored),
-                  "original_ignore_mask": ignore_mask, "crowd_masks": crowd_masks, "track_ids": [], "occluded": [], "video": str(im["id"]),
+                  "original_ignore_mask": ignore_mask, "polygon_ignore_masks": polygon_ignore_masks,
+                  "crowd_masks": crowd_masks, "track_ids": [], "occluded": [], "video": str(im["id"]),
                   "frame_index": 0, "image_id": im["id"], "transform": transform, "time": 0.}
         if "interior_exterior_windows" in im:
             interior = ~annotation_mask(im["interior_exterior_windows"], h, w)

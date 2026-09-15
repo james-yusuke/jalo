@@ -140,12 +140,32 @@ class InstanceMetrics(DetectionMetrics):
 
     def update(self, prediction, target):
         from pycocotools import mask as mask_api
+        regions = target.get('polygon_ignore_masks', [])
+        ignored = None
+        if regions:
+            ignored = np.logical_or.reduce(regions)
+            masks = [np.asarray(m, dtype=bool) & ~ignored for m in target['original_masks']]
+            usable = np.array([m.any() for m in masks], dtype=bool)
+            target = {**target,
+                'original_masks': [m for m, keep in zip(masks, usable) if keep],
+                'original_areas': [int(m.sum()) for m, keep in zip(masks, usable) if keep],
+                'original_boxes': target['original_boxes'][usable], 'labels': target['labels'][usable]}
+            for key in ('track_ids', 'occluded'):
+                if target.get(key):target[key] = [v for v, keep in zip(target[key], usable) if keep]
         start = len(self.annotations)
         super().update(prediction, {**target, "ignore_boxes": torch.empty(0, 4)})
         # COCO uses annotated instance area (not rectangle area) for size strata.
         areas = target.get("original_areas", [int(np.asarray(m).sum()) for m in target["original_masks"]])
         for annotation, area in zip(self.annotations[start:], areas):
             annotation["area"] = area
+        # Separate polygon regions must never become a single image-spanning
+        # crowd box (e.g. top and bottom letterbox bars). COCO bbox evaluation
+        # uses each region's enclosing box; mask evaluation clips exact pixels.
+        for region in regions:
+            if not np.asarray(region).any():continue
+            x, y, w, h = mask_api.toBbox(mask_rle(region)).tolist()
+            for label in range(len(self.classes)):
+                self._annotation(target['image_id'], [x, y, x+w, y+h], label, True)
         for crowd_index, (mask, label) in enumerate(target.get("crowd_masks", [])):
             x, y, w, h = mask_api.toBbox(mask_rle(mask)).tolist()
             self._annotation(target["image_id"], [x, y, x+w, y+h], label, True)
@@ -155,6 +175,10 @@ class InstanceMetrics(DetectionMetrics):
         for crowd_index, (mask, label) in enumerate(target.get("crowd_masks", [])):
             self._mask_annotation(mask, label, target["image_id"], True, target.get("crowd_areas", [None]*len(target["crowd_masks"]))[crowd_index])
         for mask, score, label in zip(prediction["masks"], prediction["scores"].tolist(), prediction["labels"].tolist()):
+            if ignored is not None:
+                raw_mask = np.asarray(mask, dtype=bool)
+                mask = raw_mask & ~ignored
+                if raw_mask.any() and not mask.any():continue
             self.mask_predictions.append({"image_id": target["image_id"], "category_id": label+1,
                                           "segmentation": mask_rle(mask), "score": score})
 

@@ -1,0 +1,64 @@
+seed: 0
+device: mps
+task: instance_segmentation
+architecture: vehicle_roi_v2
+classes:
+- car
+- truck
+- bus
+data_root: data/free_driving_adapt
+manifest: data/free_driving_adapt/manifest.json
+coco_root: data/coco_vehicle
+coco_manifest: data/coco_vehicle/manifest.json
+run_dir: runs/free_driving_adapt/full
+budget_ledger: runs/free_driving_adapt/budget.json
+initialization_sha256: bb35f57b6f2367b34770eb1d7ad6ad2b19b5ff16c5b96d4e24893ccb39124378
+image_size:
+- 544
+- 960
+initial_size:
+- 384
+- 640
+inference_size:
+- 544
+- 960
+pretrained: false
+mask_projection: native_roi
+mask_objective: local_roi
+foreground_supervision: input
+model:
+  num_classes: 3
+  dim: 192
+  heads: 6
+  layers: 3
+  queries: 100
+train:
+  batch_size: 1
+  accumulation: 4
+  lr: 0.0001
+  backbone_lr: 1.0e-05
+  weight_decay: 0.0001
+  clip_grad: 0.1
+  max_seconds: 28800
+  max_updates: 50000
+  final_evaluation_reserve_seconds: 1800
+  final_validation_reserve_seconds: 1800
+  overfit_images: 8
+  overfit_updates: 0
+  warmup_updates: 0
+  validate_every: 250
+  checkpoint_every: 250
+  flip_probability: 0.5
+  stop_on_quality_pass: false
+  require_overfit_review: false
+preliminary: false
+feasibility_reference:
+  checkpoint_sha256: 96cc619f4cfd3d0cc9be7402520282fb37b4c8e89280073e98ae695bfb04f776
+  review: runs/free_driving_adapt/expanded/overfit_review.json
+  reason: Continue all 243 tensors from the completed 126-reference preliminary model
+    on the frozen full 340-reference experiment, with 190 training images paired 1:1
+    with COCO. The already completed overfit and local-head warmup stages are preserved
+    in the lineage; only joint learning is continued. Validation and test videos have
+    not been evaluated before this run.
+  latest_checkpoint_sha256: 52976d28ccda2a2231dfbc4d57633b18f89043363735a739e0abbcf15bc8a5fe
+  latest_head_gradient_report: runs/free_driving_adapt/diverse/diagnosis_step2500_inference/result.json

@@ -33,7 +33,7 @@ def certificate(checkpoint, final_test):
             'validation':copy.deepcopy(validation),'test':copy.deepcopy(test),
             'quality_pass':bool(validation.get('quality_pass') and test.get('quality_pass')),
             'reference_type':'AI-created, visually reviewed polygons; no independent human verification',
-            'scope':'Only the named held-out daylight source; no safety or generalization certification'}
+            'scope':'Only the named held-out recordings under their observed lighting conditions; no safety or generalization certification'}
 
 
 def validate_certificate(checkpoint, settings):
