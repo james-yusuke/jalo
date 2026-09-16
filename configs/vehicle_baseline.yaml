@@ -1,0 +1,48 @@
+# New experiments start from the currently distributed ROI model.
+# Supply newly prepared video annotations, including an unused test video.
+seed: 0
+device: auto
+task: instance_segmentation
+architecture: vehicle_roi_v2
+classes: [car, truck, bus]
+data_root: data/vehicle_baseline
+manifest: data/vehicle_baseline/manifest.json
+coco_root: data/coco_vehicle
+coco_manifest: data/coco_vehicle/manifest.json
+run_dir: runs/vehicle_baseline
+budget_ledger: runs/vehicle_baseline/budget.json
+initialization_sha256: c592301a49ea72ab891aacc8b97b1b5ee1ff990200bd49a387588faf24db832f
+image_size: [544, 960]
+initial_size: [384, 640]
+inference_size: [544, 960]
+pretrained: false
+mask_projection: native_roi
+mask_objective: local_roi
+foreground_supervision: input
+model:
+  num_classes: 3
+  dim: 192
+  heads: 6
+  layers: 3
+  queries: 100
+  detach_mask_boxes: false
+train:
+  batch_size: 1
+  accumulation: 4
+  lr: 0.0001
+  backbone_lr: 0.00001
+  weight_decay: 0.0001
+  clip_grad: 0.1
+  max_seconds: 28800
+  max_updates: 50000
+  final_evaluation_reserve_seconds: 1800
+  final_validation_reserve_seconds: 1800
+  overfit_images: 8
+  overfit_updates: 100
+  warmup_updates: 0
+  validate_every: 250
+  checkpoint_every: 250
+  flip_probability: 0.5
+  stop_on_quality_pass: false
+  require_overfit_review: true
+preliminary: false

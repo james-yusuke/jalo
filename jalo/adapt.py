@@ -229,10 +229,13 @@ def train_adaptation(config,run_dir=None,resume=None,initialize=None):
                 'note':'Model/optimizer/data/RNG state restored; numerical training across backends is not bitwise equivalent.'})
     model=build_model(config,'single',pretrained=False if checkpoint or initial else None).to(device).train()
     if checkpoint:model.load_state_dict(checkpoint['model'])
-    from .initialization import initialize_roi, continue_preliminary_roi, freeze_inherited
+    from .initialization import initialize_roi, initialize_trained_roi, continue_preliminary_roi, freeze_inherited
     inheritance=checkpoint.get('initialization',{}) if checkpoint else {}
     if initial:
-        inheritance=(continue_preliminary_roi if continuation else initialize_roi)(model,initial)
+        initializer = (continue_preliminary_roi if continuation else
+                       initialize_trained_roi if initial.get('architecture') == 'vehicle_roi_v2' else
+                       initialize_roi)
+        inheritance=initializer(model,initial)
         write_json(run/'initialization.json',inheritance)
     backbone=[];other=[]
     for name,p in model.named_parameters():

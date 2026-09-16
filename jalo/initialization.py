@@ -1,5 +1,40 @@
-"""Explicit semantic migration from the public global-mask model to local masks."""
+"""Initialize from the current ROI model or migrate historical global masks."""
 import torch
+
+
+def initialize_trained_roi(model, checkpoint):
+    """Start a new experiment with every learned ROI tensor, without optimizer state."""
+    if (getattr(model, 'architecture', None) != 'vehicle_roi_v2' or
+            checkpoint.get('architecture') != 'vehicle_roi_v2' or
+            checkpoint.get('task') != 'instance_segmentation' or
+            checkpoint.get('variant') != 'single' or checkpoint.get('step', 0) < 1):
+        raise ValueError('Initialization requires a trained single-frame ROI checkpoint')
+    if checkpoint.get('classes') != ['car', 'truck', 'bus'] or model.num_classes != 3:
+        raise ValueError('Initialization class order must be car, truck, bus')
+    config = checkpoint['config']
+    if (config['model']['heads'] != model.decoder[0].heads or
+            config['model']['queries'] != model.queries or
+            config.get('mask_projection', 'dense') != model.mask_projection or
+            config.get('mask_objective', 'global') != model.mask_objective or
+            config.get('foreground_supervision', 'feature') != model.foreground_supervision):
+        raise ValueError('Initialization model semantics differ')
+    source, target = checkpoint['model'], model.state_dict()
+    if (set(source) != set(target) or any(source[name].shape != target[name].shape or
+            not torch.isfinite(source[name]).all() for name in target)):
+        raise ValueError('Incompatible trained ROI weights')
+    # Learned box deltas and local heads must survive this transfer unchanged.
+    model.load_state_dict(source, strict=True)
+    return {'source_checkpoint_sha256': checkpoint.get('loaded_sha256'),
+            'source_architecture': 'vehicle_roi_v2', 'target_architecture': 'vehicle_roi_v2',
+            'source_step': checkpoint['step'],
+            'source_manifest_sha256': checkpoint.get('manifest_sha256'),
+            'transferred': [{'source': name, 'target': name, 'shape': list(value.shape),
+                             'role': 'current trained ROI model'} for name, value in source.items()],
+            'initialized': [], 'unused_source_keys': [],
+            # All heads are learned already; there are no new modules to warm up.
+            'warmup_frozen_targets': [], 'optimizer_restored': False,
+            'transferred_parameters': sum(p.numel() for p in model.parameters()),
+            'total_parameters': sum(p.numel() for p in model.parameters())}
 
 
 def initialize_roi(model, checkpoint):
